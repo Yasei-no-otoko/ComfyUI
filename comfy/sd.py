@@ -1894,10 +1894,7 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
     if unet_dtype is None:
         unet_dtype = model_management.unet_dtype(model_params=parameters, supported_dtypes=unet_weight_dtype, weight_dtype=weight_dtype)
 
-    if model_config.quant_config is not None:
-        manual_cast_dtype = model_management.unet_manual_cast(None, load_device, model_config.supported_inference_dtypes)
-    else:
-        manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
+    manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
     model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
 
     if model_config.clip_vision_prefix is not None:
@@ -2035,10 +2032,7 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     else:
         unet_dtype = dtype
 
-    if model_config.quant_config is not None:
-        manual_cast_dtype = model_management.unet_manual_cast(None, load_device, model_config.supported_inference_dtypes)
-    else:
-        manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
+    manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
     model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
 
     if custom_operations is not None:
