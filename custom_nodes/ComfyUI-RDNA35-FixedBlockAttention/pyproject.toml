@@ -1,0 +1,11 @@
+[project]
+name = "comfyui-rdna35-fixedblockattention"
+description = "Fixed 64-token block-diagonal attention for ComfyUI on PyTorch ROCm and Triton."
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["torch"]
+
+[tool.comfy]
+PublisherId = "local"
+DisplayName = "ComfyUI RDNA35 FixedBlockAttention"
+Icon = ""
