@@ -1,3 +1,5 @@
+import logging
+
 import torch
 from . import model_base
 from . import utils
@@ -40,6 +42,17 @@ from . import latent_formats
 
 from . import diffusers_convert
 import comfy.model_management
+
+def _is_rocm_gfx1151(device=None):
+    if not comfy.model_management.is_amd():
+        return False
+    try:
+        if device is None:
+            device = comfy.model_management.get_torch_device()
+        arch = torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
+    except Exception:
+        return False
+    return arch == "gfx1151"
 
 class SD15(supported_models_base.BASE):
     unet_config = {
@@ -1269,6 +1282,13 @@ class PiD(PixelDiTT2I):
     }
 
     memory_usage_factor = 0.04
+
+    def set_inference_dtype(self, dtype, manual_cast_dtype, **kwargs):
+        if dtype in (torch.float16, torch.bfloat16) and _is_rocm_gfx1151():
+            logging.info("Forcing PiD inference dtype to fp32 on ROCm gfx1151 to avoid bf16/fp16 NaNs.")
+            dtype = torch.float32
+            manual_cast_dtype = None
+        return super().set_inference_dtype(dtype, manual_cast_dtype, **kwargs)
 
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.PiD(self, device=device)

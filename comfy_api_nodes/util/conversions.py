@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from comfy.utils import common_upscale
+from comfy.utils import common_upscale, image_to_uint8
 from comfy_api.latest import Input, InputImpl, Types
 
 from ._helpers import mimetype_to_extension
@@ -86,8 +86,7 @@ def tensor_to_pil(image: torch.Tensor, total_pixels: int | None = 2048 * 2048) -
     input_tensor = image.cpu()
     if total_pixels is not None:
         input_tensor = downscale_image_tensor(input_tensor.unsqueeze(0), total_pixels=total_pixels).squeeze()
-    image_np = (input_tensor.numpy() * 255).astype(np.uint8)
-    img = Image.fromarray(image_np)
+    img = Image.fromarray(image_to_uint8(input_tensor))
     return img
 
 

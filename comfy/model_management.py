@@ -395,6 +395,8 @@ def raise_non_oom(e):
 
 XFORMERS_VERSION = ""
 XFORMERS_ENABLED_VAE = True
+ENABLE_XFORMERS_VAE_ON_WINDOWS_AMD = "COMFYUI_ENABLE_XFORMERS_VAE_ON_WINDOWS_AMD"
+ENABLE_PYTORCH_VAE_ON_AMD = "COMFYUI_ENABLE_PYTORCH_VAE_ON_AMD"
 if args.disable_xformers:
     XFORMERS_IS_AVAILABLE = False
 else:
@@ -475,14 +477,20 @@ SUPPORT_FP8_OPS = args.supports_fp8_compute
 
 AMD_RDNA2_AND_OLDER_ARCH = ["gfx1030", "gfx1031", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]
 AMD_ENABLE_MIOPEN_ENV = 'COMFYUI_ENABLE_MIOPEN'
+AMD_DISABLE_MIOPEN_ENV = 'COMFYUI_DISABLE_MIOPEN'
 
 try:
     if is_amd():
         arch = torch.cuda.get_device_properties(get_torch_device()).gcnArchName.split(':')[0]
-        if not (any((a in arch) for a in AMD_RDNA2_AND_OLDER_ARCH)):
-            if os.getenv(AMD_ENABLE_MIOPEN_ENV) != '1':
-                torch.backends.cudnn.enabled = False  # Seems to improve things a lot on AMD
-                logging.info("Set: torch.backends.cudnn.enabled = False for better AMD performance.")
+        if os.getenv(AMD_DISABLE_MIOPEN_ENV) == '1':
+            torch.backends.cudnn.enabled = False
+            logging.info("Set: torch.backends.cudnn.enabled = False by COMFYUI_DISABLE_MIOPEN=1.")
+        elif not (any((a in arch) for a in AMD_RDNA2_AND_OLDER_ARCH)) and os.getenv(AMD_ENABLE_MIOPEN_ENV) != '1':
+            torch.backends.cudnn.enabled = False  # MIOpen/hipDNN can corrupt high-res image outputs on some AMD stacks.
+            logging.info("Set: torch.backends.cudnn.enabled = False for AMD output correctness.")
+        elif torch.backends.cudnn.is_available():
+            torch.backends.cudnn.enabled = True
+            logging.info("Set: torch.backends.cudnn.enabled = True for AMD ROCm MIOpen/hipDNN acceleration.")
 
         try:
             rocm_version = tuple(map(int, str(torch.version.hip).split(".")[:2]))
@@ -1620,6 +1628,12 @@ def xformers_enabled_vae():
     if not enabled:
         return False
 
+    if is_amd() and pytorch_attention_enabled_vae():
+        return False
+
+    if sys.platform.startswith("win") and is_amd() and os.getenv(ENABLE_XFORMERS_VAE_ON_WINDOWS_AMD) != "1":
+        return False
+
     return XFORMERS_ENABLED_VAE
 
 def pytorch_attention_enabled():
@@ -1628,7 +1642,9 @@ def pytorch_attention_enabled():
 
 def pytorch_attention_enabled_vae():
     if is_amd():
-        return False  # enabling pytorch attention on AMD currently causes crash when doing high res
+        if os.getenv(ENABLE_PYTORCH_VAE_ON_AMD) == "1":
+            return hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        return False  # enabling pytorch attention on AMD can corrupt high-res VAE decode
     return pytorch_attention_enabled()
 
 def pytorch_attention_flash_attention():

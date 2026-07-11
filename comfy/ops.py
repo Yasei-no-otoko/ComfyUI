@@ -31,6 +31,9 @@ import comfy_aimdo.model_vbar
 import comfy_aimdo.torch
 
 def run_every_op():
+    if not comfy.model_management.interrupt_processing:
+        return
+
     if torch.compiler.is_compiling():
         return
 
@@ -41,7 +44,7 @@ def scaled_dot_product_attention(q, k, v, *args, **kwargs):
 
 
 try:
-    if torch.cuda.is_available() and comfy.model_management.WINDOWS:
+    if torch.cuda.is_available() and comfy.model_management.WINDOWS and comfy.model_management.is_nvidia():
         from torch.nn.attention import SDPBackend, sdpa_kernel
         import inspect
         if "set_priority" in inspect.signature(sdpa_kernel).parameters:

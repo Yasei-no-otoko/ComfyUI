@@ -1,3 +1,112 @@
+import os
+import importlib.util
+import sysconfig
+import logging
+
+
+def is_rocm_torch_build():
+    try:
+        torch_spec = importlib.util.find_spec("torch")
+        if torch_spec is None:
+            return False
+        for folder in torch_spec.submodule_search_locations:
+            ver_file = os.path.join(folder, "version.py")
+            if os.path.isfile(ver_file):
+                spec = importlib.util.spec_from_file_location("torch_version_import", ver_file)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return "rocm" in str(module.__version__).lower() or bool(getattr(module, "hip", None))
+    except Exception:
+        pass
+    return False
+
+
+def prepend_env_path(env_name, path):
+    path = os.path.abspath(path)
+    paths = os.environ.get(env_name, "").split(os.pathsep)
+    normalized_path = os.path.normcase(path)
+    if normalized_path in {os.path.normcase(os.path.abspath(p)) for p in paths if p}:
+        return False
+
+    os.environ[env_name] = path if not os.environ.get(env_name) else path + os.pathsep + os.environ[env_name]
+    return True
+
+
+def get_rocm_arch_candidates():
+    candidates = []
+    for env_name in ("HIP_ARCHITECTURE", "PYTORCH_ROCM_ARCH", "GPU_TARGETS", "CMAKE_HIP_ARCHITECTURES"):
+        for arch in os.environ.get(env_name, "").replace(",", ";").split(";"):
+            arch = arch.strip()
+            if arch.startswith("gfx") and arch not in candidates:
+                candidates.append(arch)
+    return candidates
+
+
+def get_rocm_library_roots(platlib):
+    roots = []
+    for arch in get_rocm_arch_candidates():
+        root = os.path.join(platlib, f"_rocm_sdk_libraries_{arch}")
+        if os.path.isdir(root) and root not in roots:
+            roots.append(root)
+
+    try:
+        for name in os.listdir(platlib):
+            root = os.path.join(platlib, name)
+            if name.startswith("_rocm_sdk_libraries_") and os.path.isdir(root) and root not in roots:
+                roots.append(root)
+    except OSError:
+        pass
+
+    return roots
+
+
+def setup_windows_rocm_triton_env(log=False):
+    if os.name != "nt" or not is_rocm_torch_build():
+        return
+
+    os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+    os.environ.setdefault("PYTORCH_ROCM_ARCH", "gfx1151;gfx1201")
+    os.environ.setdefault("GPU_TARGETS", "gfx1151;gfx1201")
+    os.environ.setdefault("CMAKE_HIP_ARCHITECTURES", "gfx1151;gfx1201")
+    os.environ.setdefault("HIP_ARCHITECTURE", "gfx1151")
+
+    platlib = sysconfig.get_path("platlib")
+    rocm_core_include = os.path.join(platlib, "_rocm_sdk_core", "include")
+    if os.path.isfile(os.path.join(rocm_core_include, "hip", "hip_runtime.h")):
+        prepend_env_path("INCLUDE", rocm_core_include)
+        if log:
+            logging.info("ROCm SDK core include path is ready for Triton launcher compilation.")
+
+    for root in get_rocm_library_roots(platlib):
+        bin_path = os.path.join(root, "bin")
+        if os.path.isdir(bin_path):
+            prepend_env_path("PATH", bin_path)
+            if log:
+                logging.info("ROCm SDK architecture library bin path is ready: %s", bin_path)
+
+        hipdnn_plugin_dir = os.path.join(bin_path, "hipdnn_plugins", "engines")
+        if os.path.isdir(hipdnn_plugin_dir):
+            os.environ.setdefault("HIPDNN_PLUGIN_DIR", hipdnn_plugin_dir)
+            if log:
+                logging.info("hipDNN engine plugin directory is ready: %s", os.environ["HIPDNN_PLUGIN_DIR"])
+
+        hipdnn_heuristic_plugin_dir = os.path.join(bin_path, "hipdnn_plugins", "heuristics")
+        if os.path.isdir(hipdnn_heuristic_plugin_dir):
+            os.environ.setdefault("HIPDNN_HEURISTIC_PLUGIN_DIR", hipdnn_heuristic_plugin_dir)
+            if log:
+                logging.info("hipDNN heuristic plugin directory is ready: %s", os.environ["HIPDNN_HEURISTIC_PLUGIN_DIR"])
+
+    os.environ.setdefault("TORCH_BLAS_PREFER_HIPBLASLT", "1")
+    os.environ.setdefault("TORCH_BLAS_PREFER_CUBLASLT", "1")
+    os.environ.setdefault("ROCBLAS_USE_HIPBLASLT", "1")
+    os.environ.setdefault("CUBLASLT_WORKSPACE_SIZE", "262144")
+    os.environ.setdefault("HIPBLASLT_TUNING_USER_MAX_WORKSPACE", "268435456")
+    if log:
+        logging.info("hipBLASLt preference is ready for ROCm GEMM backends.")
+
+
+setup_windows_rocm_triton_env()
+
 import comfy.options
 comfy.options.enable_args_parsing()
 
@@ -9,8 +118,6 @@ if args.list_feature_flags:
     print(json.dumps(CLI_FEATURE_FLAG_REGISTRY, indent=2))  # noqa: T201
     raise SystemExit(0)
 
-import os
-import importlib.util
 import shutil
 import importlib.metadata
 import folder_paths
@@ -25,13 +132,13 @@ import itertools
 import utils.extra_config
 from utils.mime_types import init_mime_types
 import faulthandler
-import logging
 import signal
 import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
 from app.database.db import init_db, dependencies_available
+
 
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
@@ -65,7 +172,7 @@ if os.name == "nt":
     os.environ['MIMALLOC_PURGE_DELAY'] = '0'
 
 if __name__ == "__main__":
-    os.environ['TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL'] = '1'
+    setup_windows_rocm_triton_env(log=True)
     if args.default_device is not None:
         default_dev = args.default_device
         devices = list(range(32))

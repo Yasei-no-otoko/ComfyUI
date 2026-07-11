@@ -15,6 +15,8 @@ from .app_settings import AppSettings
 from typing import TypedDict
 
 default_user = "default"
+WINDOWS_INVALID_PATH_CHARS = set('<>:"|?*')
+WINDOWS_INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
 
 class FileInfo(TypedDict):
@@ -31,6 +33,31 @@ def get_file_info(path: str, relative_to: str) -> FileInfo:
         "modified": int(os.path.getmtime(path) * 1000),
         "created": int(os.path.getctime(path) * 1000),
     }
+
+
+def sanitize_windows_user_path(path: str) -> str:
+    if os.name != "nt":
+        return path
+
+    parts = re.split(r"[\\/]+", path)
+    sanitized_parts = []
+
+    for index, part in enumerate(parts):
+        if part.lower() in {"http:", "https:"}:
+            scheme = part[:-1].lower()
+            url_parts = parts[index + 1:]
+            while url_parts and not url_parts[0]:
+                url_parts = url_parts[1:]
+
+            parsed_url = parse.urlsplit(f"{scheme}://{'/'.join(url_parts)}")
+            file_name = os.path.basename(parsed_url.path.replace("\\", "/"))
+            file_name = "".join("_" if char in WINDOWS_INVALID_FILENAME_CHARS else char for char in file_name)
+            sanitized_parts.append(file_name.strip(" .") or "url")
+            break
+
+        sanitized_parts.append("".join("_" if char in WINDOWS_INVALID_PATH_CHARS else char for char in part))
+
+    return os.path.join(*sanitized_parts) if sanitized_parts else path
 
 
 class UserManager():
@@ -89,6 +116,8 @@ class UserManager():
             # Check if filename is url encoded
             if "%" in file:
                 file = parse.unquote(file)
+
+            file = sanitize_windows_user_path(file)
 
             # prevent leaving /{type}/{user}
             path = os.path.abspath(os.path.join(user_root, file))
