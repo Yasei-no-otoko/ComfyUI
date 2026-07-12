@@ -454,6 +454,7 @@ class CrossAttention(nn.Module):
 
     def forward(self, x, context=None, mask=None, pe=None, k_pe=None, transformer_options={}):
         q = self.to_q(x)
+        is_self_attention = context is None
         context = x if context is None else context
         k = self.to_k(context)
         v = self.to_v(context)
@@ -466,11 +467,11 @@ class CrossAttention(nn.Module):
             k = apply_rotary_emb(k, pe if k_pe is None else k_pe)
 
         if mask is None:
-            out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options, is_self_attention=is_self_attention)
         elif isinstance(mask, GuideAttentionMask):
             out = _attention_with_guide_mask(q, k, v, self.heads, mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
         else:
-            out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, mask=mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, mask=mask, attn_precision=self.attn_precision, transformer_options=transformer_options, is_self_attention=is_self_attention)
 
         # Apply per-head gating if enabled
         if self.to_gate_logits is not None:

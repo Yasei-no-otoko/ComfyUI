@@ -62,6 +62,7 @@ class CausalWanSelfAttention(nn.Module):
                 v.view(b, s, n * d),
                 heads=self.num_heads,
                 transformer_options=transformer_options,
+                is_self_attention=True,
             )
         else:
             end = kv_cache["end"]
@@ -78,6 +79,7 @@ class CausalWanSelfAttention(nn.Module):
                 kv_cache["v"][:, :new_end].view(b, new_end, n * d),
                 heads=self.num_heads,
                 transformer_options=transformer_options,
+                is_self_attention=True,
             )
 
         x = self.o(x)
