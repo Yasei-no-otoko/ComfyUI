@@ -20,6 +20,8 @@ API 5最終wheelを同一常駐プロセスでwarm-up後、同一seedのAnima IN
 
 実Animaでは33/36 exact blocksが初stepから非有限化し、32 blocksは初stepが有限でも30-step途中でNaN化した。production spatial pathは実測完走した23 blocksだけをsparse profileとして許可し、0〜22および24〜143を明示エラー、144だけをdense SDPA検証pathとして許可する。ComfyUI nodeも23/144へ固定し、最初の4 transformer blocksはFlash、後段24 self-attention blocksだけをPISAへ送る。
 
+upstreamへは本ブランチ全体を1本のPRとして送らない。`gfx1151`、Anima 1536、開始block 4へ固定したpolicyとnative packageはcustom node側に保持する。ComfyUI coreの候補は、attention backendを識別せずself/cross、token shape、block位置を明示的に渡す最小metadata変更だけに分離し、複数backendで用途を示せる場合に独立PRとする。現在の`transformer_block_index < 4`はPISA固有のlocal policyなので、そのままupstream候補にはしない。
+
 ## 1. 目的
 
 GFX1151上のAnima画像生成で、現在のPython/Triton試作版PISA（Piecewise Sparse Attention）を実用的な速度へ引き上げる。PISA本体をComposable Kernel（以下CK）のC++/HIPカーネルとして実装し、Python 3.13・PyTorch 2.14 nightly・Windows ROCm 7.15環境へpip wheelとして導入する。
