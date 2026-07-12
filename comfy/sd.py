@@ -1062,6 +1062,8 @@ class VAE:
                 free_memory = self.patcher.get_free_memory(self.device)
                 batch_number = int(free_memory / memory_used)
                 batch_number = max(1, batch_number)
+                if model_management.pytorch_attention_vae_single_batch():
+                    batch_number = 1
 
                 # Pre-allocate output for VAEs that support direct buffer writes
                 preallocated = False

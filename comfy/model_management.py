@@ -1647,6 +1647,9 @@ def pytorch_attention_enabled_vae():
         return False  # enabling pytorch attention on AMD can corrupt high-res VAE decode
     return pytorch_attention_enabled()
 
+def pytorch_attention_vae_single_batch():
+    return sys.platform == "win32" and is_amd() and pytorch_attention_enabled_vae()
+
 def pytorch_attention_flash_attention():
     global ENABLE_PYTORCH_ATTENTION
     if ENABLE_PYTORCH_ATTENTION:
