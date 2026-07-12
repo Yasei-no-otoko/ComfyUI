@@ -185,13 +185,13 @@ def _piecewise_forward(
     return output
 
 
-def _gfx_target() -> str | None:
+def _gfx_target(device: torch.device | None = None) -> str | None:
     for name in ("PYTORCH_ROCM_ARCH", "GPU_ARCHS", "AMDGPU_TARGETS", "ROCM_ARCH"):
         value = os.environ.get(name, "")
         if "gfx" in value:
             return value[value.index("gfx"):].split(";")[0].split(",")[0]
     try:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        props = torch.cuda.get_device_properties(device if device is not None else torch.cuda.current_device())
     except Exception:
         return None
     for name in ("gcnArchName", "gfx_version", "name"):
@@ -201,6 +201,44 @@ def _gfx_target() -> str | None:
     return None
 
 
+def _load_ck_backend(q: torch.Tensor):
+    if os.name != "nt":
+        return None, "ck_wheel_is_windows_only"
+    if q.device.type != "cuda":
+        return None, f"ck_requires_cuda_hip_device_not_{q.device.type}"
+    if not getattr(torch.version, "hip", None):
+        return None, "torch_version_hip_not_detected"
+    target = _gfx_target(q.device)
+    if target != "gfx1151":
+        return None, f"ck_targets_gfx1151_not_{target or 'unknown'}"
+
+    try:
+        import rdna35_pisa_ck
+    except (ImportError, OSError, RuntimeError) as exc:
+        return None, f"ck_wheel_unavailable_{type(exc).__name__}: {exc}"
+
+    try:
+        info = rdna35_pisa_ck.build_info()
+        capabilities = rdna35_pisa_ck.capabilities()
+    except (AttributeError, RuntimeError) as exc:
+        return None, f"ck_wheel_metadata_failed_{type(exc).__name__}: {exc}"
+
+    if info.get("api") != 5:
+        return None, f"ck_api_5_required_not_{info.get('api')}"
+    if info.get("architecture") != "gfx1151" or capabilities.get("architecture") != "gfx1151":
+        return None, "ck_wheel_architecture_mismatch"
+    if info.get("torch_python_build_version") != torch.__version__:
+        return None, f"ck_torch_build_mismatch_{info.get('torch_python_build_version')}_vs_{torch.__version__}"
+    if info.get("hip_python_build_version") != torch.version.hip:
+        return None, f"ck_hip_build_mismatch_{info.get('hip_python_build_version')}_vs_{torch.version.hip}"
+    if q.dtype not in capabilities.get("dtypes", ()):
+        return None, f"ck_dtype_{q.dtype}_is_not_supported"
+    max_tokens = int(capabilities.get("block_size", 0)) * int(capabilities.get("max_blocks", 0))
+    if q.shape[-2] > max_tokens:
+        return None, f"ck_tokens_{q.shape[-2]}_exceed_{max_tokens}"
+    return rdna35_pisa_ck, None
+
+
 def _triton_reject_reason(q: torch.Tensor) -> str | None:
     if os.name != "nt":
         return "staged_triton_prototype_is_windows_only"
@@ -208,7 +246,7 @@ def _triton_reject_reason(q: torch.Tensor) -> str | None:
         return f"staged_triton_requires_cuda_hip_device_not_{q.device.type}"
     if not getattr(torch.version, "hip", None):
         return "torch_version_hip_not_detected"
-    target = _gfx_target()
+    target = _gfx_target(q.device)
     if target != "gfx1151":
         return f"staged_triton_targets_gfx1151_not_{target or 'unknown'}"
     try:
@@ -239,8 +277,8 @@ def pisa_attention(
     in xie-lab-ml/piecewise-sparse-attention. No full token-level QK matrix is formed.
     """
     _validate_qkv(q, k, v, block_size)
-    if backend not in {"auto", "reference", "triton"}:
-        raise ValueError("backend must be one of: auto, reference, triton.")
+    if backend not in {"auto", "ck", "reference", "triton"}:
+        raise ValueError("backend must be one of: auto, ck, reference, triton.")
     if not isinstance(strict_backend, bool):
         raise TypeError("strict_backend must be bool.")
 
@@ -258,46 +296,60 @@ def pisa_attention(
 
     used_backend = "reference"
     fallback_reason = None
-    if backend != "reference":
-        fallback_reason = _triton_reject_reason(q)
-        if fallback_reason is None:
+    output = None
+    if backend in {"auto", "ck"}:
+        ck_backend, ck_reject_reason = _load_ck_backend(q)
+        if ck_backend is not None:
+            output = ck_backend.forward(q, k, v, exact_count, scale=scale_value, sink_block=sink_block)
+            used_backend = "ck_flex"
+        else:
+            fallback_reason = ck_reject_reason
+            if backend == "ck" and strict_backend:
+                raise RuntimeError(f"PISA CK backend unavailable: {ck_reject_reason}")
+
+    if output is None and backend in {"auto", "triton"}:
+        triton_reject_reason = _triton_reject_reason(q)
+        if triton_reject_reason is None:
             try:
                 from .pisa_kernel import pisa_prepare_triton
 
                 k_means, v_sums, h_sum, lengths = pisa_prepare_triton(k, v, block_size=block_size)
                 used_backend = "triton_staged"
             except Exception as exc:
-                fallback_reason = f"staged_triton_failed_{type(exc).__name__}: {exc}"
-        if fallback_reason is not None and backend == "triton" and strict_backend:
-            raise RuntimeError(f"PISA Triton backend unavailable: {fallback_reason}")
+                triton_reject_reason = f"staged_triton_failed_{type(exc).__name__}: {exc}"
+        if triton_reject_reason is not None:
+            fallback_reason = "; ".join(x for x in (fallback_reason, triton_reject_reason) if x)
+            if backend == "triton" and strict_backend:
+                raise RuntimeError(f"PISA Triton backend unavailable: {triton_reject_reason}")
 
-    if used_backend == "reference":
-        k_means, v_sums, h_sum, lengths = _reference_block_stats(k, v, block_size)
+    if output is None:
+        if used_backend == "reference":
+            k_means, v_sums, h_sum, lengths = _reference_block_stats(k, v, block_size)
 
-    selected = _select_blocks(
-        q,
-        k_means,
-        exact_count=exact_count,
-        block_size=block_size,
-        scale=scale_value,
-        sink_block=sink_block,
-    )
-    output = _piecewise_forward(
-        q,
-        k,
-        v,
-        k_means,
-        v_sums,
-        h_sum,
-        lengths,
-        selected,
-        block_size=block_size,
-        scale=scale_value,
-    )
+        selected = _select_blocks(
+            q,
+            k_means,
+            exact_count=exact_count,
+            block_size=block_size,
+            scale=scale_value,
+            sink_block=sink_block,
+        )
+        output = _piecewise_forward(
+            q,
+            k,
+            v,
+            k_means,
+            v_sums,
+            h_sum,
+            lengths,
+            selected,
+            block_size=block_size,
+            scale=scale_value,
+        )
     diagnostics: dict[str, Any] = {
         "backend": used_backend,
         "requested_backend": backend,
-        "optimized": used_backend == "triton_staged",
+        "optimized": used_backend in {"ck_flex", "triton_staged"},
         "fallback_reason": fallback_reason,
         "shape": tuple(q.shape),
         "dtype": str(q.dtype),
@@ -314,7 +366,7 @@ def pisa_attention(
         "shared_numerator_denominator_normalization": True,
         "materialized_token_qk": False,
         "routing_score_elements": q.shape[0] * total_blocks * total_blocks,
-        "gfx_target": _gfx_target() if q.device.type == "cuda" else None,
+        "gfx_target": _gfx_target(q.device) if q.device.type == "cuda" else None,
     }
     if return_diagnostics:
         return output, diagnostics

@@ -37,7 +37,14 @@ class GPT2FeedForward(nn.Module):
         return x
 
 
-def torch_attention_op(q_B_S_H_D: torch.Tensor, k_B_S_H_D: torch.Tensor, v_B_S_H_D: torch.Tensor, transformer_options: Optional[dict] = {}) -> torch.Tensor:
+def torch_attention_op(
+    q_B_S_H_D: torch.Tensor,
+    k_B_S_H_D: torch.Tensor,
+    v_B_S_H_D: torch.Tensor,
+    transformer_options: Optional[dict] = {},
+    is_self_attention: bool = False,
+    is_initial_transformer_block: bool | None = None,
+) -> torch.Tensor:
     """Computes multi-head attention using PyTorch's native implementation.
 
     This function provides a PyTorch backend alternative to Transformer Engine's attention operation.
@@ -64,7 +71,17 @@ def torch_attention_op(q_B_S_H_D: torch.Tensor, k_B_S_H_D: torch.Tensor, v_B_S_H
     q_B_H_S_D = rearrange(q_B_S_H_D, "b ... h k -> b h ... k").view(in_q_shape[0], in_q_shape[-2], -1, in_q_shape[-1])
     k_B_H_S_D = rearrange(k_B_S_H_D, "b ... h v -> b h ... v").view(in_k_shape[0], in_k_shape[-2], -1, in_k_shape[-1])
     v_B_H_S_D = rearrange(v_B_S_H_D, "b ... h v -> b h ... v").view(in_k_shape[0], in_k_shape[-2], -1, in_k_shape[-1])
-    return optimized_attention(q_B_H_S_D, k_B_H_S_D, v_B_H_S_D, in_q_shape[-2], skip_reshape=True, transformer_options=transformer_options)
+    return optimized_attention(
+        q_B_H_S_D,
+        k_B_H_S_D,
+        v_B_H_S_D,
+        in_q_shape[-2],
+        skip_reshape=True,
+        transformer_options=transformer_options,
+        is_self_attention=is_self_attention,
+        is_initial_transformer_block=is_initial_transformer_block,
+        attention_token_shape=tuple(in_q_shape[1:-2]),
+    )
 
 
 class Attention(nn.Module):
@@ -109,6 +126,7 @@ class Attention(nn.Module):
         device=None,
         dtype=None,
         operations=None,
+        is_initial_transformer_block: bool | None = None,
     ) -> None:
         super().__init__()
         logging.debug(
@@ -116,6 +134,7 @@ class Attention(nn.Module):
             f"{n_heads} heads with a dimension of {head_dim}."
         )
         self.is_selfattn = context_dim is None  # self attention
+        self.is_initial_transformer_block = is_initial_transformer_block
 
         context_dim = query_dim if context_dim is None else context_dim
         inner_dim = head_dim * n_heads
@@ -173,7 +192,14 @@ class Attention(nn.Module):
         return q, k, v
 
     def compute_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, transformer_options: Optional[dict] = {}) -> torch.Tensor:
-        result = self.attn_op(q, k, v, transformer_options=transformer_options)  # [B, S, H, D]
+        result = self.attn_op(
+            q,
+            k,
+            v,
+            transformer_options=transformer_options,
+            is_self_attention=self.is_selfattn,
+            is_initial_transformer_block=self.is_initial_transformer_block,
+        )  # [B, S, H * D]
         return self.output_dropout(self.output_proj(result))
 
     def forward(
@@ -408,11 +434,21 @@ class Block(nn.Module):
         device=None,
         dtype=None,
         operations=None,
+        is_initial_transformer_block: bool | None = None,
     ):
         super().__init__()
         self.x_dim = x_dim
         self.layer_norm_self_attn = operations.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6, device=device, dtype=dtype)
-        self.self_attn = Attention(x_dim, None, num_heads, x_dim // num_heads, device=device, dtype=dtype, operations=operations)
+        self.self_attn = Attention(
+            x_dim,
+            None,
+            num_heads,
+            x_dim // num_heads,
+            is_initial_transformer_block=is_initial_transformer_block,
+            device=device,
+            dtype=dtype,
+            operations=operations,
+        )
 
         self.layer_norm_cross_attn = operations.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6, device=device, dtype=dtype)
         self.cross_attn = Attention(
@@ -688,9 +724,10 @@ class MiniTrainDIT(nn.Module):
                     mlp_ratio=mlp_ratio,
                     use_adaln_lora=use_adaln_lora,
                     adaln_lora_dim=adaln_lora_dim,
+                    is_initial_transformer_block=transformer_block_index < 4,
                     device=device, dtype=dtype, operations=operations,
                 )
-                for _ in range(num_blocks)
+                for transformer_block_index in range(num_blocks)
             ]
         )
 

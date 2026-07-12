@@ -2,10 +2,10 @@
 
 ComfyUI custom nodes for fixed 64-token block-diagonal self-attention on PyTorch ROCm with an optional Triton forward kernel. This is not a port of NVIDIA Blackwell TLX code.
 
-The package also contains two isolated gfx1151 research paths. Neither replaces normal ComfyUI attention automatically:
+The package also contains two isolated gfx1151 research paths. Neither replaces normal ComfyUI attention globally:
 
 - Exact full attention with an online-softmax Triton kernel for `[BH,Q,D] x [BH,K,D]`.
-- A training-free PISA prototype based on the 2026 exact-or-approximate attention method.
+- A training-free PISA HYD path using a compiled CK Tile statistics wheel, FlexAttention, and WMMA correction.
 
 ## What This Implements
 
@@ -17,9 +17,10 @@ The Triton path is forward/inference only. There is no custom autograd or backwa
 
 - `RDNA35 Block Attention Diagnostics`: reports PyTorch, HIP, device, best-effort gfx target, Triton availability, and RDNA3.5 detection.
 - `RDNA35 Patch Model Attention`: installs a model-local `optimized_attention_override` on a cloned MODEL. It never globally monkey-patches ComfyUI attention.
+- `RDNA35 Patch Anima PISA Attention`: installs the model-local PISA override. It accepts only explicitly marked BF16 self-attention at `T=9216`, keeps the first four Anima blocks on the existing backend, and applies spatial 8x8 PISA blocks to the remaining 24 self-attention blocks. Cross-attention and other shapes chain to the previous ComfyUI backend.
 - `RDNA35 Fixed Block Attention Benchmark`: creates synthetic Q/K/V tensors, compares reference, dispatch, PyTorch SDPA with a block-diagonal mask, and normal PyTorch full SDPA. Full SDPA is reported as a semantic contrast, not as an exact replacement.
 - `RDNA35 Exact Full Attention Benchmark`: compares the gfx1151 online-softmax kernel with PyTorch SDPA for Anima-like self- and cross-attention shapes.
-- `RDNA35 PISA Attention Prototype Benchmark`: reports latency and numerical deviation for the staged PISA implementation. It is intentionally not exposed as a model patch until the mixed exact/approximate loop is fused and faster than Flash Attention.
+- `RDNA35 PISA Attention Benchmark`: separates first-use compile time from GPU-event steady-state time and compares the CK/Flex hybrid with dense SDPA.
 
 ## Measured gfx1151 results
 
@@ -31,9 +32,9 @@ On the local PyTorch 2.14 ROCm 7.15 stack with BF16 and `B=2,H=16,D=128`:
 | Q=4096, K=512 | 1.763 ms | 2.445 ms | 1.387x slower |
 | Q=9216, K=9216 | 48.137 ms | 90.257 ms | 1.875x slower |
 
-The exact kernel is retained as a portable correctness baseline but is not selected for generation. The staged PISA preparation kernel takes about 0.5 ms at `T=4096`, while the current Python/PyTorch mixed-attention stage takes seconds. A fused wave64 implementation is still required before PISA can be considered for model dispatch.
+The exact Triton kernel is retained as a correctness baseline but is not selected for generation. With `rdna35-pisa-ck` 0.7.0 API 5, BF16 `B=2,H=16,T=9216,D=128`, and 23/144 exact blocks, the complete spatial PISA call measured 37.917 ms versus 46.411 ms for ComfyUI Flash Attention. The native Q/K/V spatial pack measured 2.412 ms, down from 19.54 ms before the shared-memory transpose.
 
-PISA remains approximate. At 15.625% exact blocks on random `T=4096,D=128` tensors, cosine similarity against dense attention was about 0.81. Production quality must be measured on real Anima Q/K/V and generated images even after the kernel becomes fast.
+After warm-up in the same resident ComfyUI process, an Anima INT8_ConvRot 1536x1536 Spectrum 30-step run with 17 actual forwards measured 69.12 s Sampler / 69.17 s Prompt total on Flash and 68.63 s / 68.68 s on `rdna35-pisa-ck` 0.7.0 API 5. PISA reduced both by 0.49 s (0.7%). PISA is approximate and deliberately opt-in: the coherent same-seed image had SSIM 0.961379 and RGB cosine 0.999484 against Flash. The spatial path accepts only the validated 23-block sparse profile: 32 became non-finite during 30 steps, 33/36 were non-finite on the first step, and other sparse budgets are not production-validated. 144 blocks remains available only as the dense SDPA validation path.
 
 ## Install
 
@@ -43,13 +44,17 @@ Place this folder under:
 C:\ComfyUI\custom_nodes\ComfyUI-RDNA35-FixedBlockAttention
 ```
 
-Restart ComfyUI. The nodes appear under `RDNA35/Fixed Block Attention`.
+Restart ComfyUI. Fixed-block nodes appear under `RDNA35/Fixed Block Attention`; the opt-in PISA patch appears under `RDNA35/Attention Research`.
 
-Recommended runtime:
+The PISA patch additionally requires the wheel under `native/rdna35_pisa_ck`. Build it with the exact PyTorch/ROCm runtime and `MAX_JOBS=32`, then install it with `pip install --no-deps`. The wheel is BF16-only and rejects a different PyTorch/ROCm nightly before loading its extension.
+
+Recommended runtime for the generic Triton research nodes:
 
 - PyTorch ROCm build
 - Triton compatible with that PyTorch ROCm build
 - AMD RDNA3.5 target such as `gfx1150`, `gfx1151`, or `gfx1152`
+
+The prebuilt PISA wheel is narrower: Windows, BF16, and `gfx1151` only.
 
 PyTorch ROCm still uses `torch.cuda` APIs and `device="cuda"` strings. ROCm detection is based on `torch.version.hip`.
 
@@ -64,6 +69,8 @@ rdna35_attention_semantics = "fixed_block_diagonal"
 `experimental_force_block_local` is opt-in. It still refuses calls that are not explicitly marked or otherwise proven self-attention. Cross-attention is never intentionally converted to block-local attention.
 
 If a safe local model patch cannot be installed, the node returns the original model and includes the reason in the `info` output.
+
+`RDNA35 Patch Anima PISA Attention` requires the `is_self_attention=True` marker and the initial-block marker supplied by the Cosmos/Anima attention owner. The `anima_1536_spatial` policy never converts the first four transformer blocks, cross-attention, masked calls, FP16 calls, or another sequence length. Its sparse profile is fixed at the validated 23/144 blocks. Once a native/Flex call starts, failures are surfaced instead of retrying another backend on the same asynchronous stream.
 
 ## Optimized Dispatch Conditions
 
@@ -85,6 +92,11 @@ Otherwise dispatch falls back to the PyTorch reference implementation with a rea
 ## Limitations
 
 - Forward/inference only
+- CK/Flex PISA is BF16-only and gfx1151-only
+- PISA model dispatch supports only Anima `T=9216`; other token counts stay on Flash
+- First use compiles two FlexAttention kernels; benchmark cold and steady-state runs separately
+- PISA output is approximate and can change composition relative to Flash Attention
+- Spatial sparse PISA accepts only the validated 23 exact blocks; other sparse budgets are rejected after real-model non-finite results at 32/33/36
 - Fixed `block_size=64`
 - No arbitrary mask in the Triton path
 - No cross-attention conversion

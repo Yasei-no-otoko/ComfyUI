@@ -37,6 +37,21 @@ def _dense_sdpa(q, k, v):
 
 class PISAAttentionTests(unittest.TestCase):
     @unittest.skipUnless(GFX1151_AVAILABLE, "requires a gfx1151 ROCm device")
+    def test_gfx1151_ck_auto_dispatch_is_bfloat16_only(self):
+        torch.manual_seed(13)
+        q = torch.randn((1, 128, 128), device="cuda", dtype=torch.bfloat16)
+        k = torch.randn_like(q)
+        v = torch.randn_like(q)
+        expected = pisa_attention(q, k, v, exact_budget=0.5, backend="reference")
+        actual, info = pisa_attention(q, k, v, exact_budget=0.5, backend="auto", return_diagnostics=True)
+        self.assertEqual(info["backend"], "ck_flex")
+        torch.testing.assert_close(actual.float(), expected.float(), atol=5e-2, rtol=5e-2)
+
+        fp16 = q.to(torch.float16)
+        with self.assertRaisesRegex(RuntimeError, "CK backend unavailable"):
+            pisa_attention(fp16, fp16, fp16, exact_budget=0.5, backend="ck", strict_backend=True)
+
+    @unittest.skipUnless(GFX1151_AVAILABLE, "requires a gfx1151 ROCm device")
     def test_gfx1151_triton_stats_match_reference_bf16_and_fp16(self):
         for dtype in (torch.bfloat16, torch.float16):
             with self.subTest(dtype=dtype):

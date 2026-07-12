@@ -11,6 +11,7 @@ from .rdna35_block_attention.diagnostics import detect_runtime, explain_dispatch
 from .rdna35_block_attention.dispatch import fixed_block_attention
 from .rdna35_block_attention.full_attention import full_attention_triton
 from .rdna35_block_attention.pisa_attention import pisa_attention
+from .rdna35_block_attention.pisa_patch import patch_model_pisa_attention
 from .rdna35_block_attention.reference import (
     fixed_block_attention_ref,
     fixed_block_attention_sdpa,
@@ -67,6 +68,34 @@ class RDNA35PatchModelAttention:
         return patched, info
 
 
+class RDNA35PatchAnimaPISAAttention:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "enabled": ("BOOLEAN", {"default": True}),
+                "verbose_fallbacks": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("model", "info")
+    FUNCTION = "patch"
+    CATEGORY = "RDNA35/Attention Research"
+    EXPERIMENTAL = True
+
+    def patch(self, model, enabled, verbose_fallbacks):
+        return patch_model_pisa_attention(
+            model,
+            enabled=enabled,
+            exact_budget=0.15625,
+            token_policy="anima_1536_spatial",
+            start_layer=4,
+            verbose_fallbacks=verbose_fallbacks,
+        )
+
+
 def _sync_if_cuda(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -77,11 +106,20 @@ def _median_ms(fn, device: torch.device, iterations: int = 20, warmup: int = 5) 
         fn()
     _sync_if_cuda(device)
 
+    if device.type == "cuda":
+        starts = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+        ends = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+        for start, end in zip(starts, ends):
+            start.record()
+            fn()
+            end.record()
+        torch.cuda.synchronize(device)
+        return float(statistics.median(start.elapsed_time(end) for start, end in zip(starts, ends)))
+
     samples = []
     for _ in range(iterations):
         start = time.perf_counter()
         fn()
-        _sync_if_cuda(device)
         samples.append((time.perf_counter() - start) * 1000.0)
     return float(statistics.median(samples))
 
@@ -208,10 +246,10 @@ class RDNA35PISAAttentionBenchmark:
         return {
             "required": {
                 "batch_heads": ("INT", {"default": 1, "min": 1, "max": 40}),
-                "tokens": ("INT", {"default": 1024, "min": 128, "max": 4096, "step": 64}),
+                "tokens": ("INT", {"default": 9216, "min": 128, "max": 9216, "step": 64}),
                 "exact_budget": ("FLOAT", {"default": 0.15625, "min": 0.015625, "max": 1.0, "step": 0.015625}),
-                "dtype": (["float16", "bfloat16"], {"default": "bfloat16"}),
-                "backend": (["auto", "triton", "reference"], {"default": "auto"}),
+                "dtype": (["bfloat16"], {"default": "bfloat16"}),
+                "backend": (["ck", "auto", "triton", "reference"], {"default": "ck"}),
             }
         }
 
@@ -229,27 +267,49 @@ class RDNA35PISAAttentionBenchmark:
         k = torch.randn_like(q)
         v = torch.randn_like(q)
         reference = torch.nn.functional.scaled_dot_product_attention(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)).squeeze(0)
-        start = time.perf_counter()
-        output, info = pisa_attention(q, k, v, exact_budget=exact_budget, backend=backend, return_diagnostics=True)
         _sync_if_cuda(device)
-        pisa_ms = (time.perf_counter() - start) * 1000.0
+        start = time.perf_counter()
+        output, info = pisa_attention(
+            q,
+            k,
+            v,
+            exact_budget=exact_budget,
+            backend=backend,
+            strict_backend=backend in {"ck", "triton"},
+            return_diagnostics=True,
+        )
+        _sync_if_cuda(device)
+        cold_ms = (time.perf_counter() - start) * 1000.0
+        pisa_ms = _median_ms(
+            lambda: pisa_attention(q, k, v, exact_budget=exact_budget, backend=backend, strict_backend=backend in {"ck", "triton"}),
+            device,
+        )
+        sdpa_ms = _median_ms(lambda: torch.nn.functional.scaled_dot_product_attention(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)), device)
         cosine = torch.nn.functional.cosine_similarity(reference.float().flatten(), output.float().flatten(), dim=0).item()
         return ("\n".join([
-            "RDNA35 PISA Attention Prototype Benchmark",
+            "RDNA35 PISA Attention Benchmark",
             f"shape: BH={batch_heads} T={tokens} D=128 dtype={compute_dtype}",
             f"backend: {info.get('backend')}",
             f"exact blocks: {info.get('exact_blocks_per_query')}/{info.get('total_blocks')}",
-            f"PISA wall time: {pisa_ms:.3f} ms",
+            f"PISA cold compile/call: {cold_ms:.3f} ms",
+            f"PISA steady-state median: {pisa_ms:.3f} ms",
+            f"dense SDPA steady-state median: {sdpa_ms:.3f} ms",
+            f"PISA/dense latency ratio: {pisa_ms / sdpa_ms:.3f}x",
             f"cosine vs dense SDPA: {cosine:.9f}",
             f"mean abs error: {(output.float() - reference.float()).abs().mean().item():.6g}",
             f"fallback: {info.get('fallback_reason')}",
-            "Prototype only: mixed exact/approximate attention is not yet fused and is not installed as a model patch.",
+            (
+                "CK Tile block statistics + PyTorch FlexAttention exact/tail + WMMA first-order correction."
+                if info.get("backend") == "ck_flex"
+                else "CK/Flex hybrid did not run; see backend and fallback above."
+            ),
         ]),)
 
 
 NODE_CLASS_MAPPINGS: dict[str, Any] = {
     "RDNA35BlockAttentionDiagnostics": RDNA35BlockAttentionDiagnostics,
     "RDNA35PatchModelAttention": RDNA35PatchModelAttention,
+    "RDNA35PatchAnimaPISAAttention": RDNA35PatchAnimaPISAAttention,
     "RDNA35FixedBlockAttentionBenchmark": RDNA35FixedBlockAttentionBenchmark,
     "RDNA35FullAttentionBenchmark": RDNA35FullAttentionBenchmark,
     "RDNA35PISAAttentionBenchmark": RDNA35PISAAttentionBenchmark,
@@ -258,7 +318,8 @@ NODE_CLASS_MAPPINGS: dict[str, Any] = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RDNA35BlockAttentionDiagnostics": "RDNA35 Block Attention Diagnostics",
     "RDNA35PatchModelAttention": "RDNA35 Patch Model Attention",
+    "RDNA35PatchAnimaPISAAttention": "RDNA35 Patch Anima PISA Attention",
     "RDNA35FixedBlockAttentionBenchmark": "RDNA35 Fixed Block Attention Benchmark",
     "RDNA35FullAttentionBenchmark": "RDNA35 Exact Full Attention Benchmark",
-    "RDNA35PISAAttentionBenchmark": "RDNA35 PISA Attention Prototype Benchmark",
+    "RDNA35PISAAttentionBenchmark": "RDNA35 PISA Attention Benchmark",
 }
