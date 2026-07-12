@@ -80,7 +80,7 @@ def torch_attention_op(
         transformer_options=transformer_options,
         is_self_attention=is_self_attention,
         is_initial_transformer_block=is_initial_transformer_block,
-        attention_token_shape=tuple(in_q_shape[1:-2]),
+        attention_token_shape=transformer_options.get("attention_token_shape", tuple(in_q_shape[1:-2])),
     )
 
 
@@ -528,6 +528,8 @@ class Block(nn.Module):
         gate_mlp_B_T_1_1_D = rearrange(gate_mlp_B_T_D, "b t d -> b t 1 1 d")
 
         B, T, H, W, D = x_B_T_H_W_D.shape
+        self_attn_options = transformer_options.copy()
+        self_attn_options["attention_token_shape"] = (T, H, W)
 
         def _fn(_x_B_T_H_W_D, _norm_layer, _scale_B_T_1_1_D, _shift_B_T_1_1_D):
             return _norm_layer(_x_B_T_H_W_D) * (1 + _scale_B_T_1_1_D) + _shift_B_T_1_1_D
@@ -544,7 +546,7 @@ class Block(nn.Module):
                 rearrange(normalized_x_B_T_H_W_D.to(compute_dtype), "b t h w d -> b (t h w) d"),
                 None,
                 rope_emb=rope_emb_L_1_1_D,
-                transformer_options=transformer_options,
+                transformer_options=self_attn_options,
             ),
             "b (t h w) d -> b t h w d",
             t=T,

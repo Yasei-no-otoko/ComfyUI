@@ -1,5 +1,19 @@
 # GFX1151向けOrigami最適化計画
 
+## Product-shape oracle追試（2026-07-13）
+
+`scripts/origami_product_oracle.py`と`bench_origami_anima_gemm.py`を追加し、variantごとに別プロセス・別Inductor cacheを使って、実Animaの主要BF16 GEMM 3形状を再測定した。実機はPyTorch報告20 units、Origami物理CU model 40 CUsである。
+
+| `(M,N,K)` | DEFAULT-off | Origami top-8 | 改善率 |
+|---|---:|---:|---:|
+| `(18432,2048,2048)` | 5.764 ms | 5.690 ms | 1.3% |
+| `(18432,8192,2048)` | 17.572 ms | 17.429 ms | 0.8% |
+| `(18432,2048,8192)` | 26.313 ms | 23.396 ms | 11.1% |
+
+3形状の単純合計は49.650 msから46.515 msへ6.3%短縮した。compileは224.20秒から23.17秒へ89.7%短縮している。従って現行launcherの`TORCHINDUCTOR_ORIGAMI=1`、`TORCHINDUCTOR_ORIGAMI_TOPK=8`、`DEFAULT`を維持する。
+
+`EXHAUSTIVE`は620秒経過しても3形状を完走せず中断した。製品起動時のoracleには使わず、候補回帰を疑う形状だけを夜間・単形状で測る。今回のtop-8は3形状ともDEFAULT-off以上であり、以前の未修正WGM経路で観測したMLP-upの重大回帰は再現しなかった。生データは`user/origami-oracle-results-20260713`、cacheは`user/origami-oracle-cache-20260713`に保存した。
+
 ## 追加検証結果（2026-07-12）
 
 - 現行`rocm-libraries/develop`から、MSVCおよびWindows分割ROCm SDK対応を加えた`origami 0.1.0`を32並列でビルド・導入した。
