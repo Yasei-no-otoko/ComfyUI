@@ -1,0 +1,245 @@
+diff --git a/shared/origami/CMakeLists.txt b/shared/origami/CMakeLists.txt
+index 7542903..3d03871 100644
+--- a/shared/origami/CMakeLists.txt
++++ b/shared/origami/CMakeLists.txt
+@@ -25,7 +25,23 @@ option(ORIGAMI_ENABLE_PYTHON "Enable Python bindings." OFF)
+ option(ORIGAMI_BUILD_TESTING "Build tests." OFF)
+ option(ORIGAMI_ENABLE_FETCH "Auto-fetch dependencies with FetchContent" ON)
+ 
+-find_package(hip REQUIRED)
++if(WIN32)
++    if(NOT TARGET hip::host)
++        if(NOT EXISTS "$ENV{ROCM_CORE}/lib/amdhip64.lib")
++            message(FATAL_ERROR "ROCM_CORE must point to the Windows ROCm core package")
++        endif()
++        if(NOT IS_DIRECTORY "$ENV{ROCM_DEVEL}/include")
++            message(FATAL_ERROR "ROCM_DEVEL must point to the Windows ROCm development package")
++        endif()
++        add_library(hip::host UNKNOWN IMPORTED)
++        set_target_properties(hip::host PROPERTIES
++            IMPORTED_LOCATION "$ENV{ROCM_CORE}/lib/amdhip64.lib"
++            INTERFACE_INCLUDE_DIRECTORIES "$ENV{ROCM_CORE}/include;$ENV{ROCM_DEVEL}/include"
++        )
++    endif()
++else()
++    find_package(hip REQUIRED)
++endif()
+ 
+ if(ORIGAMI_BUILD_SHARED_LIBS OR (BUILD_SHARED_LIBS AND ORIGAMI_STANDALONE))
+     set(ORIGAMI_LIBRARY_TYPE SHARED)
+@@ -60,6 +76,9 @@ add_library(origami-headers INTERFACE)
+ add_library(roc::origami-headers ALIAS origami-headers)
+ 
+ target_compile_features(origami-headers INTERFACE cxx_std_17)
++if(WIN32)
++    target_compile_definitions(origami-headers INTERFACE __HIP_PLATFORM_AMD__)
++endif()
+ 
+ target_sources(origami-headers
+     INTERFACE
+@@ -108,6 +127,9 @@ target_sources(
+ )
+ 
+ target_link_libraries(origami PRIVATE hip::host)
++if(WIN32)
++    target_compile_definitions(origami PRIVATE __HIP_PLATFORM_AMD__)
++endif()
+ 
+ if(ORIGAMI_ENABLE_PYTHON)
+     add_subdirectory(python)
+diff --git a/shared/origami/python/CMakeLists.txt b/shared/origami/python/CMakeLists.txt
+index 1a8ea24..19d9597 100644
+--- a/shared/origami/python/CMakeLists.txt
++++ b/shared/origami/python/CMakeLists.txt
+@@ -5,6 +5,20 @@ cmake_minimum_required(VERSION 3.25.2)
+ 
+ project(origami-python VERSION 0.1.0 LANGUAGES CXX)
+ 
++if(WIN32 AND NOT TARGET hip::host)
++    if(NOT EXISTS "$ENV{ROCM_CORE}/lib/amdhip64.lib")
++        message(FATAL_ERROR "ROCM_CORE must point to the Windows ROCm core package")
++    endif()
++    if(NOT IS_DIRECTORY "$ENV{ROCM_DEVEL}/include")
++        message(FATAL_ERROR "ROCM_DEVEL must point to the Windows ROCm development package")
++    endif()
++    add_library(hip::host UNKNOWN IMPORTED)
++    set_target_properties(hip::host PROPERTIES
++        IMPORTED_LOCATION "$ENV{ROCM_CORE}/lib/amdhip64.lib"
++        INTERFACE_INCLUDE_DIRECTORIES "$ENV{ROCM_CORE}/include;$ENV{ROCM_DEVEL}/include"
++    )
++endif()
++
+ # Find Python
+ find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+ 
+@@ -29,7 +43,9 @@ else()
+     set(ORIGAMI_TARGET roc::origami)
+ endif()
+ 
+-find_package(hip REQUIRED)
++if(NOT TARGET hip::host)
++    find_package(hip REQUIRED)
++endif()
+ 
+ find_package(nanobind CONFIG QUIET)
+ if(NOT nanobind_FOUND)
+@@ -58,10 +74,13 @@ nanobind_add_module(_pyorigami "${CMAKE_CURRENT_SOURCE_DIR}/src/origami/bindings
+ 
+ set_target_properties(_pyorigami PROPERTIES OUTPUT_NAME "origami")
+ 
+-# Place the compiled module in the source package directory for development/testing
+-set_target_properties(_pyorigami PROPERTIES
+-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/origami"
+-)
++# Place standalone development builds in the source package directory. Wheel
++# builds are installed from the build tree and must not write into the source.
++if(NOT SKBUILD)
++    set_target_properties(_pyorigami PROPERTIES
++        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/origami"
++    )
++endif()
+ 
+ # Link against origami library and HIP
+ target_link_libraries(_pyorigami PRIVATE ${ORIGAMI_TARGET} hip::host)
+diff --git a/shared/origami/python/src/origami/bindings.cpp b/shared/origami/python/src/origami/bindings.cpp
+index 0c64f8f..51281b0 100644
+--- a/shared/origami/python/src/origami/bindings.cpp
++++ b/shared/origami/python/src/origami/bindings.cpp
+@@ -297,6 +297,15 @@ NB_MODULE(origami, m) {
+   m.def("select_config_mnk",
+         &origami::select_config_mnk,
+         "Select best configuration for M,N,K dimensions");
++  m.def(
++      "select_topk_configs",
++      [](const origami::problem_t& problem,
++         const origami::hardware_t& hardware,
++         const std::vector<origami::config_t>& configs,
++         std::size_t topk) {
++        return origami::select_topk_configs(problem, hardware, configs, topk);
++      },
++      "Select topk GEMM configurations");
+   m.def("select_topk_configs", &origami::select_topk_configs, "Select topk configurations");
+   m.def("compute_perf_gflops", &origami::compute_perf_gflops, "Compute performance in GFLOPS");
+ 
+diff --git a/shared/origami/python/src/origami/selector.py b/shared/origami/python/src/origami/selector.py
+index caf8500..66c7a41 100644
+--- a/shared/origami/python/src/origami/selector.py
++++ b/shared/origami/python/src/origami/selector.py
+@@ -341,6 +341,7 @@ class OrigamiMatmulSelector:
+             new_config.mt        = mt
+             new_config.mi        = mi
+             new_config.occupancy = config.kwargs['waves_per_eu']
++            new_config.workgroup_mapping = config.kwargs.get('GROUP_M', 0)
+ 
+             configs_list.append(new_config)
+ 
+@@ -731,4 +732,3 @@ class OrigamiAttentionSelector:
+         problem.b_mx_block_size = 0
+ 
+         return problem
+-
+diff --git a/shared/origami/python/tests/test_selector.py b/shared/origami/python/tests/test_selector.py
+index 2aa5733..0b1dfe1 100644
+--- a/shared/origami/python/tests/test_selector.py
++++ b/shared/origami/python/tests/test_selector.py
+@@ -16,12 +16,13 @@ from origami.selector import OrigamiMatmulSelector
+ class MockConfig:
+     """Mock Triton config for testing."""
+     
+-    def __init__(self, block_m, block_n, block_k, waves_per_eu):
++    def __init__(self, block_m, block_n, block_k, waves_per_eu, group_m=0):
+         self.kwargs = {
+             'BLOCK_M': block_m,
+             'BLOCK_N': block_n,
+             'BLOCK_K': block_k,
+-            'waves_per_eu': waves_per_eu
++            'waves_per_eu': waves_per_eu,
++            'GROUP_M': group_m,
+         }
+ 
+ 
+@@ -164,6 +165,26 @@ def test_selector_wgm_property(rocm_device):
+     assert selector.wgm > 0
+ 
+ 
++@pytest.mark.integration
++def test_gfx1151_selector_preserves_group_m(rocm_device):
++    if "gfx1151" not in torch.cuda.get_device_properties(rocm_device).gcnArchName:
++        pytest.skip("gfx1151 is required")
++
++    selector = OrigamiMatmulSelector(
++        config_gen=[MockConfig(64, 128, 32, 2, group_m=4)],
++        m=18432,
++        n=2048,
++        k=8192,
++        a_dtype=torch.bfloat16,
++        b_dtype=torch.bfloat16,
++        out_dtype=torch.bfloat16,
++        device=rocm_device,
++    )
++
++    assert selector._result.config.workgroup_mapping == 4
++    assert selector.wgm == 4
++
++
+ @pytest.mark.integration
+ def test_selector_number_of_cus_property(rocm_device):
+     """Test number_of_cus property."""
+@@ -744,4 +765,3 @@ def test_selector_transpose_mixed_layouts(rocm_device):
+     
+     assert selector._problem.a_transpose == origami.transpose_t.T
+     assert selector._problem.b_transpose == origami.transpose_t.N
+-
+diff --git a/shared/origami/src/origami/gemm.cpp b/shared/origami/src/origami/gemm.cpp
+index 87be86d..0822d18 100644
+--- a/shared/origami/src/origami/gemm.cpp
++++ b/shared/origami/src/origami/gemm.cpp
+@@ -225,6 +225,9 @@ workgroup_mapping_t predict_workgroup_mapping(const problem_t& problem,
+                                               size_t grid_m,
+                                               size_t grid_n,
+                                               size_t splitting_factor) {
++  if (hardware.arch == hardware_t::architecture_t::gfx1151 && config.workgroup_mapping > 0)
++    return {0, 0, config.workgroup_mapping};
++
+   // Extract parameters
+   const size_t batch = problem.batch;
+ 
+@@ -321,7 +324,8 @@ workgroup_mapping_t predict_workgroup_mapping(const problem_t& problem,
+   size_t best_wgm  = 1;
+   double best_cost = std::numeric_limits<double>::max();
+   for (uint64_t m = cmask; m; m &= m - 1) {
+-    size_t wgm_candidate = static_cast<size_t>(__builtin_ctzll(m));
++    size_t wgm_candidate = 0;
++    for (uint64_t bit = m & (~m + 1); bit > 1; bit >>= 1) ++wgm_candidate;
+     size_t slab_tiles    = grid_m * wgm_candidate;
+     size_t first_slab    = start / slab_tiles;
+     size_t last_slab     = (start + count - 1) / slab_tiles;
+diff --git a/shared/origami/src/origami/origami.cpp b/shared/origami/src/origami/origami.cpp
+index ebab255..f29186e 100644
+--- a/shared/origami/src/origami/origami.cpp
++++ b/shared/origami/src/origami/origami.cpp
+@@ -67,6 +67,11 @@ workgroup_mapping_t select_workgroup_mapping(const problem_t& problem,
+     return workgroup_mapping_t{0, 0, 0};
+   }
+ 
++  if(hardware.arch == hardware_t::architecture_t::gfx1151 && config.workgroup_mapping > 0)
++  {
++    return workgroup_mapping_t{0, 0, config.workgroup_mapping};
++  }
++
+   // Default values
+   size_t numCUs             = hardware.N_CU;
+   size_t numXCD             = hardware.NUM_XCD;
+diff --git a/shared/origami/src/origami/streamk.cpp b/shared/origami/src/origami/streamk.cpp
+index 0e47eee..c4db60e 100644
+--- a/shared/origami/src/origami/streamk.cpp
++++ b/shared/origami/src/origami/streamk.cpp
+@@ -355,7 +355,7 @@ size_t grid_k_split_aware(const problem_t& problem,
+     const size_t b_contig_bytes = (problem.b_transpose == transpose_t::N)
+                                       ? fragment_iters * config.mt.k * bpe_b
+                                       : 0;
+-    auto not_aligned_to_cache_line = [](size_t bytes) {
++    auto not_aligned_to_cache_line = [&](size_t bytes) {
+       return bytes > 0 && (bytes % CACHE_LINE_BYTES) != 0;
+     };
+     return not_aligned_to_cache_line(a_contig_bytes) || not_aligned_to_cache_line(b_contig_bytes);
