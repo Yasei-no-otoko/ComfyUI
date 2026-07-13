@@ -971,6 +971,12 @@ class LTXBaseModel(torch.nn.Module, ABC):
         merged_args = {**transformer_options, **kwargs}
         x, pixel_coords, additional_args = self._process_input(x, keyframe_idxs, denoise_mask, **merged_args)
         merged_args.update(additional_args)
+        transformer_options.pop("attention_token_grid", None)
+        orig_shape = additional_args.get("orig_shape")
+        if isinstance(x, torch.Tensor) and isinstance(orig_shape, (tuple, list)) and len(orig_shape) == 5:
+            token_grid = tuple(orig_shape[-3:])
+            if math.prod(token_grid) == x.shape[1]:
+                transformer_options["attention_token_grid"] = token_grid
 
         # Prepare timestep and context
         timestep, embedded_timestep, prompt_timestep = self._prepare_timestep(timestep, batch_size, input_dtype, **merged_args)
