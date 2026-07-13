@@ -1,5 +1,4 @@
 import math
-import os
 import sys
 import inspect
 
@@ -19,24 +18,6 @@ from comfy import model_management
 if model_management.xformers_enabled():
     import xformers
     import xformers.ops
-    try:
-        from xformers.ops.fmha import ck as xformers_fmha_ck
-        from xformers.ops.fmha import ck_splitk as xformers_fmha_ck_splitk
-        from xformers.ops.fmha import flash as xformers_fmha_flash
-        from xformers.ops.fmha import triton_splitk as xformers_fmha_triton_splitk
-        from xformers.ops.fmha.common import Inputs as XFormersFMHAInputs
-    except Exception:
-        xformers_fmha_ck = None
-        xformers_fmha_ck_splitk = None
-        xformers_fmha_flash = None
-        xformers_fmha_triton_splitk = None
-        XFormersFMHAInputs = None
-else:
-    xformers_fmha_ck = None
-    xformers_fmha_ck_splitk = None
-    xformers_fmha_flash = None
-    xformers_fmha_triton_splitk = None
-    XFormersFMHAInputs = None
 
 SAGE_ATTENTION_IS_AVAILABLE = False
 SAGE_ATTENTION_SUPPORTS_MASK = False
@@ -61,23 +42,12 @@ except ImportError:
 
 FLASH_ATTENTION_IS_AVAILABLE = False
 try:
-    if not model_management.xformers_enabled():
-        raise ImportError
-    from xformers._flash_attn.flash_attn_triton_amd.bwd_prefill_fused import flash_attn_func as _xformers_flash_attn_func
-
-    def flash_attn_func(*args, **kwargs):
-        out = _xformers_flash_attn_func(*args, **kwargs)
-        return out[0] if isinstance(out, tuple) else out
-
+    from flash_attn import flash_attn_func
     FLASH_ATTENTION_IS_AVAILABLE = True
 except ImportError:
-    try:
-        from flash_attn import flash_attn_func
-        FLASH_ATTENTION_IS_AVAILABLE = True
-    except ImportError:
-        if model_management.flash_attention_enabled():
-            logging.error(f"\n\nTo use the `--use-flash-attention` feature, xformers with bundled Flash Attention or the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
-            exit(-1)
+    if model_management.flash_attention_enabled():
+        logging.error(f"\n\nTo use the `--use-flash-attention` feature, the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
+        exit(-1)
 
 REGISTERED_ATTENTION_FUNCTIONS = {}
 def register_attention_function(name: str, func: Callable):
@@ -481,134 +451,8 @@ try:
 except:
     pass
 
-def _env_int(name, default):
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        logging.warning("Invalid %s=%r, using %s", name, value, default)
-        return default
-
-
-XFORMERS_ROCM_OP_SELECTION = os.environ.get("COMFYUI_XFORMERS_ROCM_OP", "auto").strip().lower()
-XFORMERS_ROCM_FLASH_MIN_SEQ_LEN = _env_int("COMFYUI_XFORMERS_ROCM_FLASH_MIN_SEQ_LEN", _env_int("XFORMERS_HIP_FLASH_MIN_SEQ_LEN", 4096))
-XFORMERS_ROCM_SPLITK_MIN_KV = _env_int("COMFYUI_XFORMERS_ROCM_SPLITK_MIN_KV", 256)
-XFORMERS_ROCM_SPLITK_MAX_Q = _env_int("COMFYUI_XFORMERS_ROCM_SPLITK_MAX_Q", 32)
-XFORMERS_ROCM_CK_SPLITK_MAX_Q = _env_int("COMFYUI_XFORMERS_ROCM_CK_SPLITK_MAX_Q", 1)
-XFORMERS_ROCM_CK_SPLITK_MAX_M = _env_int("COMFYUI_XFORMERS_ROCM_CK_SPLITK_MAX_M", 1024)
-XFORMERS_SDPA_FALLBACK_WARNED = False
-
-
-def _xformers_rocm_first_supported(inputs, ops):
-    for op in ops:
-        if op is None:
-            continue
-        try:
-            if not op.not_supported_reasons(inputs):
-                return op
-        except Exception:
-            continue
-    return None
-
-
-def _xformers_rocm_ck_splitk_shape_supported(q):
-    return q.shape[1] <= XFORMERS_ROCM_CK_SPLITK_MAX_M
-
-
-def _xformers_rocm_select_op(q, k, v, mask):
-    if XFormersFMHAInputs is None:
-        return None
-
-    mode = XFORMERS_ROCM_OP_SELECTION
-    if mode in ("", "default", "dispatch", "off", "none", "false", "0"):
-        return None
-
-    if not q.is_cuda or not model_management.is_amd():
-        return None
-
-    needs_gradient = torch.is_grad_enabled() and (q.requires_grad or k.requires_grad or v.requires_grad)
-    if needs_gradient:
-        return None
-
-    inputs = XFormersFMHAInputs(query=q, key=k, value=v, attn_bias=mask, p=0.0)
-
-    if mode in ("ck", "ckf"):
-        return _xformers_rocm_first_supported(inputs, (xformers_fmha_ck.FwOp,))
-    if mode in ("fa2", "flash", "flash2", "flash_attention"):
-        return _xformers_rocm_first_supported(inputs, (xformers_fmha_flash.FwOp,))
-    if mode in ("ck_splitk", "ck_splitkf"):
-        if not _xformers_rocm_ck_splitk_shape_supported(q):
-            return None
-        return _xformers_rocm_first_supported(inputs, (xformers_fmha_ck_splitk.FwOp,))
-    if mode in ("triton_splitk", "triton_splitkf"):
-        return _xformers_rocm_first_supported(inputs, (xformers_fmha_triton_splitk.FwOp,))
-    if mode in ("splitk", "splitkf"):
-        ck_splitk_ops = (xformers_fmha_ck_splitk.FwOp,) if _xformers_rocm_ck_splitk_shape_supported(q) else ()
-        return _xformers_rocm_first_supported(inputs, (xformers_fmha_triton_splitk.FwOp,) + ck_splitk_ops)
-
-    if mode not in ("auto", "best", "auto_full"):
-        return None
-
-    q_len = q.shape[1]
-    kv_len = k.shape[1]
-    mqa_or_gqa = k.ndim > 3 and k.stride(-2) == 0 and k.shape[-2] > 1
-    if mask is None and kv_len >= XFORMERS_ROCM_SPLITK_MIN_KV:
-        if q_len <= XFORMERS_ROCM_CK_SPLITK_MAX_Q and _xformers_rocm_ck_splitk_shape_supported(q):
-            ck_splitk_op = _xformers_rocm_first_supported(inputs, (xformers_fmha_ck_splitk.FwOp,))
-            if ck_splitk_op is not None:
-                return ck_splitk_op
-        if mqa_or_gqa and q_len <= XFORMERS_ROCM_SPLITK_MAX_Q:
-            flash_op = _xformers_rocm_first_supported(inputs, (xformers_fmha_flash.FwOp,))
-            if flash_op is not None:
-                return flash_op
-
-    if mask is None and q.shape[1] >= XFORMERS_ROCM_FLASH_MIN_SEQ_LEN:
-        flash_op = _xformers_rocm_first_supported(inputs, (xformers_fmha_flash.FwOp,))
-        if flash_op is not None:
-            return flash_op
-
-    if mode in ("best", "auto_full"):
-        return _xformers_rocm_first_supported(inputs, (xformers_fmha_ck.FwOp,))
-
-    return None
-
-
-def _should_fallback_xformers_to_sdpa(exception):
-    if isinstance(exception, NotImplementedError):
-        return True
-
-    message = str(exception)
-    return (
-        "xformers::efficient_attention" in message
-        or "No operator found" in message
-        or "operator wasn't built" in message
-    )
-
-
-def _xformers_exception_summary(exception):
-    return str(exception).splitlines()[0]
-
-
-def _attention_xformers_sdpa_fallback(q, k, v, mask, **kwargs):
-    sdpa_keys = ("scale", "enable_gqa")
-    sdpa_extra = {key: value for key, value in kwargs.items() if key in sdpa_keys}
-    out = comfy.ops.scaled_dot_product_attention(
-        q.transpose(1, 2),
-        k.transpose(1, 2),
-        v.transpose(1, 2),
-        attn_mask=mask,
-        dropout_p=0.0,
-        is_causal=False,
-        **sdpa_extra,
-    )
-    return out.transpose(1, 2)
-
-
 @wrap_attn
 def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
-    global XFORMERS_SDPA_FALLBACK_WARNED
     b = q.shape[0]
     dim_head = q.shape[-1]
     # check to make sure xformers isn't broken
@@ -622,11 +466,8 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
         if torch.jit.is_tracing() or torch.jit.is_scripting():
             disabled_xformers = True
 
-    if not (q.is_cuda and k.is_cuda and v.is_cuda):
-        disabled_xformers = True
-
     if disabled_xformers:
-        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
+        return attention_pytorch(q, k, v, heads, mask, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
 
     if skip_reshape:
         # b h k d -> b k h d
@@ -640,14 +481,6 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
     else:
         dim_head //= heads
         q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head, kwargs.get("enable_gqa", False))
-
-    original_dtype = q.dtype
-    restore_dtype = None
-    if q.is_cuda and model_management.is_amd() and q.dtype == torch.float32:
-        # CK Tile FMHA on ROCm does not dispatch float32 inputs.
-        compute_dtype = torch.bfloat16 if model_management.should_use_bf16(q.device, manual_cast=True) else torch.float16
-        q, k, v = map(lambda t: t.to(dtype=compute_dtype), (q, k, v))
-        restore_dtype = original_dtype
 
     if mask is not None:
         # add a singleton batch dimension
@@ -669,22 +502,7 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
         mask = mask_out[..., :mask.shape[-1]]
         mask = mask.expand(b, heads, -1, -1)
 
-    try:
-        xformers_op = _xformers_rocm_select_op(q, k, v, mask)
-        if xformers_op is None:
-            out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=mask, scale=kwargs.get("scale", None))
-        else:
-            out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=mask, op=(xformers_op, None), scale=kwargs.get("scale", None))
-    except Exception as e:
-        if not _should_fallback_xformers_to_sdpa(e):
-            raise
-        if not XFORMERS_SDPA_FALLBACK_WARNED:
-            logging.warning("xformers attention failed to dispatch, using pytorch SDPA instead: %s", _xformers_exception_summary(e))
-            XFORMERS_SDPA_FALLBACK_WARNED = True
-        out = _attention_xformers_sdpa_fallback(q, k, v, mask, **kwargs)
-
-    if restore_dtype is not None:
-        out = out.to(dtype=restore_dtype)
+    out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=mask, scale=kwargs.get("scale", None))
 
     if skip_output_reshape:
         out = out.permute(0, 2, 1, 3)
@@ -890,19 +708,24 @@ def attention3_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
     return out
 
-def _flash_attn_eager(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                dropout_p: float = 0.0, causal: bool = False, softmax_scale: float = -1.0) -> torch.Tensor:
-    softmax_scale_arg = None if softmax_scale == -1.0 else softmax_scale
-    return flash_attn_func(q, k, v, dropout_p=dropout_p, causal=causal, softmax_scale=softmax_scale_arg)
-
-
 try:
-    flash_attn_wrapper = torch.compiler.disable(
-        _flash_attn_eager,
-        reason="flash-attn custom op schema lookup is unstable on this ROCm torch build",
-    )
-except AttributeError:
-    flash_attn_wrapper = _flash_attn_eager
+    @torch.library.custom_op("flash_attention::flash_attn", mutates_args=())
+    def flash_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                    dropout_p: float = 0.0, causal: bool = False, softmax_scale: float = -1.0) -> torch.Tensor:
+        softmax_scale_arg = None if softmax_scale == -1.0 else softmax_scale
+        return flash_attn_func(q, k, v, dropout_p=dropout_p, causal=causal, softmax_scale=softmax_scale_arg)
+
+
+    @flash_attn_wrapper.register_fake
+    def flash_attn_fake(q, k, v, dropout_p=0.0, causal=False, softmax_scale=-1.0):
+        # Output shape is the same as q
+        return q.new_empty(q.shape)
+except AttributeError as error:
+    FLASH_ATTN_ERROR = error
+
+    def flash_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                    dropout_p: float = 0.0, causal: bool = False, softmax_scale: float = -1.0) -> torch.Tensor:
+        assert False, f"Could not define flash_attn_wrapper: {FLASH_ATTN_ERROR}"
 
 @wrap_attn
 def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
@@ -987,30 +810,12 @@ register_attention_function("sub_quad", attention_sub_quad)
 register_attention_function("split", attention_split)
 
 
-ROCM_AOTRITON_SMALL_INPUT_ARCHS = {"gfx1151", "gfx1152", "gfx1153"}
-ROCM_AOTRITON_SMALL_INPUT_SUPPORTED = None
-
-
-def _rocm_aotriton_small_input_supported(device):
-    global ROCM_AOTRITON_SMALL_INPUT_SUPPORTED
-
-    if torch.version.hip is None or device.type != "cuda":
-        return False
-    try:
-        if torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0] not in ROCM_AOTRITON_SMALL_INPUT_ARCHS:
-            return False
-        if ROCM_AOTRITON_SMALL_INPUT_SUPPORTED is None:
-            ROCM_AOTRITON_SMALL_INPUT_SUPPORTED = torch.backends.cuda.preferred_rocm_fa_library().name == "AOTriton"
-        return ROCM_AOTRITON_SMALL_INPUT_SUPPORTED
-    except (AttributeError, RuntimeError):
-        return False
-
-
 def optimized_attention_for_device(device, mask=False, small_input=False):
     if small_input:
-        if model_management.pytorch_attention_enabled() or (not mask and _rocm_aotriton_small_input_supported(device)):
+        if model_management.pytorch_attention_enabled():
             return attention_pytorch #TODO: need to confirm but this is probably slightly faster for small inputs in all cases
-        return attention_basic
+        else:
+            return attention_basic
 
     if device == torch.device("cpu"):
         return attention_sub_quad

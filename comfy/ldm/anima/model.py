@@ -1,12 +1,7 @@
-import sys
-
 from comfy.ldm.cosmos.predict2 import MiniTrainDIT
-from comfy.ldm.modules import attention as comfy_attention
-import comfy.ops
 import torch
 from torch import nn
-
-ANIMA_SAGE_SDPA_TOKEN_LIMIT = 1024
+import torch.nn.functional as F
 
 
 def rotate_half(x):
@@ -20,46 +15,6 @@ def apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1):
     sin = sin.unsqueeze(unsqueeze_dim)
     x_embed = (x * cos) + (rotate_half(x) * sin)
     return x_embed
-
-
-def optimized_anima_attention(query_states, key_states, value_states, heads, mask=None):
-    optimized_attention = comfy_attention.optimized_attention
-    if (
-        optimized_attention is comfy_attention.attention_sage
-        and max(query_states.shape[-2], key_states.shape[-2]) <= ANIMA_SAGE_SDPA_TOKEN_LIMIT
-    ):
-        return comfy.ops.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=mask,
-            dropout_p=0.0,
-            is_causal=False,
-        )
-
-    if (
-        optimized_attention is comfy_attention.attention_xformers
-        and sys.platform.startswith("win")
-        and torch.version.hip is not None
-    ):
-        return comfy.ops.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=mask,
-            dropout_p=0.0,
-            is_causal=False,
-        )
-
-    return optimized_attention(
-        query_states,
-        key_states,
-        value_states,
-        heads,
-        mask=mask,
-        skip_reshape=True,
-        skip_output_reshape=True,
-    )
 
 
 class RotaryEmbedding(nn.Module):
@@ -122,15 +77,7 @@ class Attention(nn.Module):
             cos, sin = position_embeddings_context
             key_states = apply_rotary_pos_emb(key_states, cos, sin)
 
-        target_dtype = torch.promote_types(torch.promote_types(query_states.dtype, key_states.dtype), value_states.dtype)
-        if query_states.dtype != target_dtype:
-            query_states = query_states.to(dtype=target_dtype)
-        if key_states.dtype != target_dtype:
-            key_states = key_states.to(dtype=target_dtype)
-        if value_states.dtype != target_dtype:
-            value_states = value_states.to(dtype=target_dtype)
-
-        attn_output = optimized_anima_attention(query_states, key_states, value_states, self.n_heads, mask=mask)
+        attn_output = F.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=mask)
 
         attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)

@@ -7,9 +7,6 @@ set "PYTHON_SITE_PACKAGES=C:\Users\HarutoWatanabe\AppData\Local\Programs\Python\
 set "ROCM_CORE=%PYTHON_SITE_PACKAGES%\_rocm_sdk_core"
 set "ROCM_DEVEL=%PYTHON_SITE_PACKAGES%\_rocm_sdk_devel"
 set "ROCM_LIBS=%PYTHON_SITE_PACKAGES%\_rocm_sdk_libraries_gfx1151"
-set "XFORMERS_ROCM_PATH=%PYTHON_SITE_PACKAGES%\xformers"
-set "XFORMERS_FLASH_ATTENTION_PATH=%XFORMERS_ROCM_PATH%\_flash_attn"
-set "XFORMERS_FLASH_ATTENTION_AMD_PATH=%XFORMERS_FLASH_ATTENTION_PATH%\flash_attn_triton_amd"
 
 set "PATH=%ROCM_LIBS%\bin;%ROCM_CORE%\bin;%ROCM_DEVEL%\bin;%PATH%"
 set "INCLUDE=%ROCM_CORE%\include;%ROCM_DEVEL%\include;%INCLUDE%"
@@ -32,14 +29,6 @@ set "PYTORCH_ROCM_ARCH=gfx1151;gfx1201"
 set "GPU_TARGETS=gfx1151;gfx1201"
 set "CMAKE_HIP_ARCHITECTURES=gfx1151;gfx1201"
 set "HIP_ARCHITECTURE=gfx1151"
-
-set "XFORMERS_HIP_FLASH_MIN_SEQ_LEN=4096"
-set "COMFYUI_XFORMERS_ROCM_OP=auto"
-set "COMFYUI_XFORMERS_ROCM_FLASH_MIN_SEQ_LEN=4096"
-set "COMFYUI_XFORMERS_ROCM_SPLITK_MIN_KV=256"
-set "COMFYUI_XFORMERS_ROCM_SPLITK_MAX_Q=32"
-set "COMFYUI_XFORMERS_ROCM_CK_SPLITK_MAX_Q=1"
-set "COMFYUI_XFORMERS_ROCM_CK_SPLITK_MAX_M=1024"
 
 rem Stability profile for LTX/LightTricks video VAE decode on Windows ROCm.
 rem This intentionally avoids --gpu-only, --highvram, --disable-dynamic-vram,

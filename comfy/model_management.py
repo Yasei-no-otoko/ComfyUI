@@ -395,7 +395,6 @@ def raise_non_oom(e):
 
 XFORMERS_VERSION = ""
 XFORMERS_ENABLED_VAE = True
-ENABLE_XFORMERS_VAE_ON_WINDOWS_AMD = "COMFYUI_ENABLE_XFORMERS_VAE_ON_WINDOWS_AMD"
 ENABLE_PYTORCH_VAE_ON_AMD = "COMFYUI_ENABLE_PYTORCH_VAE_ON_AMD"
 if args.disable_xformers:
     XFORMERS_IS_AVAILABLE = False
@@ -1626,12 +1625,6 @@ def xformers_enabled():
 def xformers_enabled_vae():
     enabled = xformers_enabled()
     if not enabled:
-        return False
-
-    if is_amd() and pytorch_attention_enabled_vae():
-        return False
-
-    if sys.platform.startswith("win") and is_amd() and os.getenv(ENABLE_XFORMERS_VAE_ON_WINDOWS_AMD) != "1":
         return False
 
     return XFORMERS_ENABLED_VAE
