@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import os
 import sys
 import torch
 
@@ -17,6 +18,36 @@ WINDOWS_ROCM_INDUCTOR_OPTIONS = {
     "triton.cudagraphs": False,
     "triton.cudagraph_trees": False,
 }
+
+
+def configure_windows_inductor():
+    """Configure TorchInductor's parallel compiler for Windows."""
+    if sys.platform != "win32":
+        return
+
+    requested_threads = int(
+        os.environ.get(
+            "TORCHINDUCTOR_COMPILE_THREADS",
+            min(64, os.cpu_count() or 1),
+        )
+    )
+    # ProcessPoolExecutor supports at most 61 workers on Windows.
+    compile_threads = min(requested_threads, 61)
+    os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = str(compile_threads)
+    os.environ["TORCHINDUCTOR_WORKER_START"] = "spawn"
+    os.environ.setdefault("MAX_JOBS", str(min(64, os.cpu_count() or 1)))
+    os.environ.setdefault("CMAKE_BUILD_PARALLEL_LEVEL", str(min(64, os.cpu_count() or 1)))
+
+    try:
+        import torch._inductor.config as inductor_config
+
+        inductor_config.compile_threads = compile_threads
+        inductor_config.worker_start_method = "spawn"
+    except ImportError:
+        pass
+
+
+configure_windows_inductor()
 
 
 def _is_windows_rocm_inductor(backend: Optional[str]) -> bool:
@@ -70,6 +101,9 @@ def set_torch_compile_wrapper(model: ModelPatcher, backend: str, options: Option
     When keys is None, it will default to using ["diffusion_model"], compiling the whole diffusion_model.
     When a list of keys is provided, it will perform torch.compile on only the selected modules.
     '''
+    if backend == "inductor":
+        configure_windows_inductor()
+
     # clear out any other torch.compile wrappers
     model.remove_wrappers_with_key(WrappersMP.APPLY_MODEL, COMPILE_KEY)
     # if no keys, default to 'diffusion_model'
