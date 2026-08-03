@@ -39,12 +39,19 @@ if not defined PYTORCH_CUDA_ALLOC_CONF set "PYTORCH_CUDA_ALLOC_CONF=garbage_coll
 if exist "%ROCM_LIBS%\bin\hipdnn_plugins\engines" set "HIPDNN_PLUGIN_DIR=%ROCM_LIBS%\bin\hipdnn_plugins\engines"
 if exist "%ROCM_LIBS%\bin\hipdnn_plugins\heuristics" set "HIPDNN_HEURISTIC_PLUGIN_DIR=%ROCM_LIBS%\bin\hipdnn_plugins\heuristics"
 
-rem Use the installed CK FlashAttention extension, not Triton FlashAttention.
+rem Keep AITER out of this launcher. On Windows, importing AITER selects its Triton-only path.
+set "AITER_ENABLE_HIP=0"
+set "AITER_TRITON_ONLY=0"
+set "AITER_USE_SYSTEM_TRITON=0"
+
+rem Use the installed CK FlashAttention extension, with every Triton attention path disabled.
 set "FLASH_ATTENTION_TRITON_AMD_ENABLE=FALSE"
+set "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=0"
 set "TORCH_ROCM_FA_PREFER_CK=0"
 
 rem Keep enough headroom for H3 VideoVAE decode while Dynamic VRAM streams model weights.
 if not defined COMFY_VIDEO_RESERVE_VRAM set "COMFY_VIDEO_RESERVE_VRAM=8"
 if not defined COMFY_VIDEO_DYNAMIC_HEADROOM set "COMFY_VIDEO_DYNAMIC_HEADROOM=4"
 
-"%PYTHON_EXE%" -u main.py --enable-manager --listen 0.0.0.0 --enable-dynamic-vram --vram-headroom %COMFY_VIDEO_DYNAMIC_HEADROOM% --reserve-vram %COMFY_VIDEO_RESERVE_VRAM% --disable-async-offload --cache-ram --use-flash-attention --disable-xformers %*
+echo [H3] AITER=OFF Triton=OFF CK-Flash=ON DynamicVRAM=ON
+"%PYTHON_EXE%" -u main.py --enable-manager --listen 0.0.0.0 --enable-dynamic-vram --vram-headroom %COMFY_VIDEO_DYNAMIC_HEADROOM% --reserve-vram %COMFY_VIDEO_RESERVE_VRAM% --disable-async-offload --cache-ram --use-flash-attention --disable-triton-backend --disable-xformers %*
