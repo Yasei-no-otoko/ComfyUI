@@ -65,13 +65,16 @@ def read_tensor_file_slice_into(tensor, destination, stream=None, destination2=N
     hostbuf = getattr(destination.untyped_storage(), "_comfy_hostbuf", None)
     if hostbuf is not None:
         stream_ptr = getattr(stream, "cuda_stream", 0) if stream is not None else 0
-        device_ptr = destination2.data_ptr() if destination2 is not None else 0
+        device_ptr = destination2.data_ptr() if destination2 is not None and stream_ptr else 0
         with info.lock:
             hostbuf.read_file_slice(file_obj, info.offset, info.size,
                                     offset=destination.data_ptr() - hostbuf.get_raw_address(),
                                     stream=stream_ptr,
                                     device_ptr=device_ptr,
                                     device=None if destination2 is None else destination2.device.index)
+        if destination2 is not None and not stream_ptr:
+            # AIMDO treats a null stream as host-only, so finish the synchronous device copy here.
+            destination2.copy_(destination, non_blocking=False)
         return True
 
     if not hasattr(file_obj, "seek") or not hasattr(file_obj, "readinto"):
