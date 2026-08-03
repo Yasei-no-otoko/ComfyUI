@@ -44,7 +44,7 @@ set "AITER_ENABLE_HIP=0"
 set "AITER_TRITON_ONLY=0"
 set "AITER_USE_SYSTEM_TRITON=0"
 
-rem Use SageAttention while keeping ComfyUI's general Triton backend disabled.
+rem Use the installed CK FlashAttention extension, with every Triton attention path disabled.
 set "FLASH_ATTENTION_TRITON_AMD_ENABLE=FALSE"
 set "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=0"
 set "TORCH_ROCM_FA_PREFER_CK=0"
@@ -53,5 +53,5 @@ rem Keep enough headroom for H3 VideoVAE decode while Dynamic VRAM streams model
 if not defined COMFY_VIDEO_RESERVE_VRAM set "COMFY_VIDEO_RESERVE_VRAM=8"
 if not defined COMFY_VIDEO_DYNAMIC_HEADROOM set "COMFY_VIDEO_DYNAMIC_HEADROOM=4"
 
-echo [H3] AITER=OFF Comfy-Triton=OFF SageAttention=ON DynamicVRAM=ON
-"%PYTHON_EXE%" -u main.py --enable-manager --listen 0.0.0.0 --enable-dynamic-vram --vram-headroom %COMFY_VIDEO_DYNAMIC_HEADROOM% --reserve-vram %COMFY_VIDEO_RESERVE_VRAM% --disable-async-offload --cache-ram --use-sage-attention --disable-triton-backend --disable-xformers %*
+echo [H3] AITER=OFF Triton=OFF CK-Flash=ON DynamicVRAM=ON
+"%PYTHON_EXE%" -u main.py --enable-manager --listen 0.0.0.0 --enable-dynamic-vram --vram-headroom %COMFY_VIDEO_DYNAMIC_HEADROOM% --reserve-vram %COMFY_VIDEO_RESERVE_VRAM% --disable-async-offload --cache-ram --use-flash-attention --disable-triton-backend --disable-xformers %*
