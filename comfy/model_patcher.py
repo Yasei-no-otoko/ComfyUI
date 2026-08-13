@@ -1794,32 +1794,15 @@ class ModelPatcherDynamic(ModelPatcher):
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
 
-    def _vbar_param_size(self, module, module_name, param_name):
-        key = key_param_name_to_key(module_name, param_name)
-        weight, _, _ = get_key_weight(self.model, key)
-        if weight is None:
-            return 0
-        if isinstance(weight, QuantizedTensor):
-            geometry = weight
-        else:
-            model_dtype = getattr(module, param_name + "_comfy_model_dtype", None) or weight.dtype
-            geometry = comfy.memory_management.TensorGeometry(shape=weight.shape, dtype=model_dtype)
-        return comfy.memory_management.vram_aligned_size(geometry)
-
-    def _vbar_size(self, loading):
-        size = 0
-        for *_, module_mem, module_name, module, params in loading:
-            if hasattr(module, "comfy_cast_weights") and module_mem > 16 * 1024:
-                size += self._vbar_param_size(module, module_name, "weight")
-                size += self._vbar_param_size(module, module_name, "bias")
-        return size
-
-    def _vbar_get(self, create=False, size=0):
+    def _vbar_get(self, create=False):
         if self.load_device == torch.device("cpu"):
             return None
         vbar = self.model.dynamic_vbars.get(self.load_device, None)
-        if create and vbar is None and size > 0:
-            vbar = comfy_aimdo.model_vbar.ModelVBAR(size, self.load_device.index)
+        if create and vbar is None:
+            # x10. We dont know what model defined type casts we have in the vbar, but virtual address
+            # space is pretty free. This will cover someone casting an entire model from FP4 to FP32
+            # with some left over.
+            vbar = comfy_aimdo.model_vbar.ModelVBAR(self.model_size() * 10, self.load_device.index)
             self.model.dynamic_vbars[self.load_device] = vbar
         return vbar
 
@@ -1887,10 +1870,7 @@ class ModelPatcherDynamic(ModelPatcher):
         with self.use_ejected():
             self.unpatch_hooks()
 
-            loading = self._load_list(for_dynamic=True, default_device=device_to)
-            loading.sort()
-            vbar_size = self._vbar_size(loading)
-            vbar = self._vbar_get(create=True, size=vbar_size)
+            vbar = self._vbar_get(create=True)
             pin_state = self.model.dynamic_pins[self.load_device]
             if not pin_state["hostbufs_initialized"]:
                 hostbuf_size = comfy.model_management.pinned_hostbuf_size(self.model_size())
@@ -1904,8 +1884,32 @@ class ModelPatcherDynamic(ModelPatcher):
             if vbar is not None:
                 vbar.prioritize()
 
+            loading = self._load_list(for_dynamic=True, default_device=device_to)
+            loading.sort()
+
+            get_units = getattr(self.model, "get_dynamic_vram__units", None)
+            dynamic_units, last_dynamic_units = get_units() if get_units is not None else ([], [])
+            dynamic_units = list(dynamic_units)
+            last_dynamic_units = list(last_dynamic_units)
+            loading_by_module = {entry[-2]: entry for entry in loading}
+            loading = []
+            for unit in dynamic_units:
+                unit_modules = unit if isinstance(unit, (list, tuple)) else (unit,)
+                modules = [module for root in unit_modules for module in root.modules() if module in loading_by_module]
+                for index, module in enumerate(modules):
+                    loading.append((*loading_by_module.pop(module), unit if index == len(modules) - 1 else None))
+            last_loading = []
+            for unit in last_dynamic_units:
+                unit_modules = unit if isinstance(unit, (list, tuple)) else (unit,)
+                modules = [module for root in unit_modules for module in root.modules() if module in loading_by_module]
+                for index, module in enumerate(modules):
+                    last_loading.append((*loading_by_module.pop(module), unit if index == len(modules) - 1 else None))
+            loading.extend((*entry, None) for entry in loading_by_module.values())
+            loading.extend(last_loading)
+            v_block = None
+
             for x in loading:
-                *_, module_mem, n, m, params = x
+                *_, module_mem, n, m, params, end_of_block = x
 
                 def set_dirty(item, dirty):
                     if dirty or not hasattr(item, "_v_signature"):
@@ -1933,9 +1937,12 @@ class ModelPatcherDynamic(ModelPatcher):
                     if key in self.weight_wrapper_patches:
                         weight_function.extend(self.weight_wrapper_patches[key])
                     setattr(m, param_key + "_function", weight_function)
+                    geometry = weight
                     if not isinstance(weight, QuantizedTensor):
-                        weight._model_dtype = getattr(m, param_key + "_comfy_model_dtype", None) or weight.dtype
-                    return (False, self._vbar_param_size(m, n, param_key))
+                        model_dtype = getattr(m, param_key + "_comfy_model_dtype", None) or weight.dtype
+                        weight._model_dtype = model_dtype
+                        geometry = comfy.memory_management.TensorGeometry(shape=weight.shape, dtype=model_dtype)
+                    return (False, comfy.memory_management.vram_aligned_size(geometry))
 
                 def force_load_param(self, param_key, device_to):
                     key = key_param_name_to_key(n, param_key)
@@ -1995,6 +2002,13 @@ class ModelPatcherDynamic(ModelPatcher):
 
                 move_weight_functions(m, device_to)
 
+                if hasattr(m, "_v"):
+                    v_block = m._v if v_block is None else (v_block[0], v_block[1], max(v_block[2], m._v[1] + m._v[2] - v_block[1]))
+                if end_of_block is not None:
+                    unit = end_of_block
+                    (unit[0] if isinstance(unit, (list, tuple)) else unit)._v_block = v_block
+                    v_block = None
+
             for key, buf in self.model.named_buffers(recurse=True):
                 if key not in self.backup_buffers:
                     self.backup_buffers[key] = buf
@@ -2009,7 +2023,7 @@ class ModelPatcherDynamic(ModelPatcher):
             in_loop = bool(getattr(tqdm.tqdm, "_instances", None))
             level = logging.DEBUG if in_loop and getattr(self, "_last_prepare_log_key", None) == log_key else logging.INFO
             self._last_prepare_log_key = log_key
-            logging.log(level, f"Model {self.model.__class__.__name__} prepared for dynamic VRAM loading. {allocated_size // (1024 ** 2)}MB Staged in {vbar_size // (1024 ** 2)}MB VBAR. {num_patches} patches attached.{force_load_stat}")
+            logging.log(level, f"Model {self.model.__class__.__name__} prepared for dynamic VRAM loading. {allocated_size // (1024 ** 2)}MB Staged. {num_patches} patches attached.{force_load_stat}")
 
             self.model.device = device_to
             self.model.current_weight_patches_uuid = self.patches_uuid
