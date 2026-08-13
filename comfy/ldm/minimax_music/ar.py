@@ -318,7 +318,7 @@ class MiniMaxMusic3AR(nn.Module):
                 [[decoder, self.model.audio_extra_embedding]], device, {"prefetch_dynamic_vbars": True}
             )
             comfy.model_prefetch.prefetch_queue_pop(
-                depth_queue, device, decoder, execution_dtype, core=depth_core, enable_graph=True, generator=generator
+                depth_queue, device, decoder, execution_dtype, core=depth_core, enable_graph=torch.version.hip is None, generator=generator
             )
             comfy.model_prefetch.prefetch_queue_pop(depth_queue, device, None)
             feedback_codes = depth_io["codes"]
