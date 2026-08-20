@@ -4,6 +4,7 @@ cd /d C:\ComfyUI
 
 set "PYTHON_EXE=C:\Users\HarutoWatanabe\AppData\Local\Programs\Python\Python313\python.exe"
 set "PYTHON_SITE_PACKAGES=C:\Users\HarutoWatanabe\AppData\Local\Programs\Python\Python313\Lib\site-packages"
+set "PYTHONPATH=C:\ComfyUI\custom_nodes\comfy-kitchen.disabled;%PYTHONPATH%"
 set "ROCM_CORE=%PYTHON_SITE_PACKAGES%\_rocm_sdk_core"
 set "ROCM_DEVEL=%PYTHON_SITE_PACKAGES%\_rocm_sdk_devel"
 set "ROCM_LIBS=%PYTHON_SITE_PACKAGES%\_rocm_sdk_libraries_gfx1151"
@@ -38,12 +39,11 @@ if not defined PYTORCH_CUDA_ALLOC_CONF set "PYTORCH_CUDA_ALLOC_CONF=garbage_coll
 if exist "%ROCM_LIBS%\bin\hipdnn_plugins\engines" set "HIPDNN_PLUGIN_DIR=%ROCM_LIBS%\bin\hipdnn_plugins\engines"
 if exist "%ROCM_LIBS%\bin\hipdnn_plugins\heuristics" set "HIPDNN_HEURISTIC_PLUGIN_DIR=%ROCM_LIBS%\bin\hipdnn_plugins\heuristics"
 
-rem Keep AITER out of this launcher. On Windows, importing AITER selects its Triton-only path.
 set "AITER_ENABLE_HIP=1"
 set "AITER_TRITON_ONLY=0"
 set "AITER_USE_SYSTEM_TRITON=1"
 
-rem Use the installed CK FlashAttention extension, with every Triton attention path disabled.
+rem Keep external FlashAttention and AOTriton paths out of this comparison launcher.
 set "FLASH_ATTENTION_TRITON_AMD_ENABLE=FALSE"
 set "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=0"
 set "TORCH_ROCM_FA_PREFER_CK=0"
@@ -52,5 +52,5 @@ rem Keep enough headroom for H3 VideoVAE decode while Dynamic VRAM streams model
 if not defined COMFY_VIDEO_RESERVE_VRAM set "COMFY_VIDEO_RESERVE_VRAM=8"
 if not defined COMFY_VIDEO_DYNAMIC_HEADROOM set "COMFY_VIDEO_DYNAMIC_HEADROOM=4"
 
-echo [H3] AITER=ON Triton=ON CK-Flash=ON DynamicVRAM=ON
-"%PYTHON_EXE%" -u main.py --enable-manager --listen 0.0.0.0 --enable-dynamic-vram --vram-headroom %COMFY_VIDEO_DYNAMIC_HEADROOM% --reserve-vram %COMFY_VIDEO_RESERVE_VRAM% --disable-async-offload --cache-ram --use-flash-attention %*
+echo [H3] AITER=ON Triton=ON ComfyKitchen-INT8=ON DynamicVRAM=ON
+"%PYTHON_EXE%" -u main.py --enable-manager --listen 0.0.0.0 --enable-dynamic-vram --vram-headroom %COMFY_VIDEO_DYNAMIC_HEADROOM% --reserve-vram %COMFY_VIDEO_RESERVE_VRAM% --disable-async-offload --cache-ram --use-ck-attention %*

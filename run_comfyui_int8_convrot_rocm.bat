@@ -4,7 +4,7 @@ cd /d C:\ComfyUI
 
 set "PYTHON_EXE=C:\Users\HarutoWatanabe\AppData\Local\Programs\Python\Python313\python.exe"
 set "PYTHON_SITE_PACKAGES=C:\Users\HarutoWatanabe\AppData\Local\Programs\Python\Python313\Lib\site-packages"
-set "PYTHONPATH=C:\ComfyUI\custom_nodes\comfy-kitchen;%PYTHONPATH%"
+set "PYTHONPATH=C:\ComfyUI\custom_nodes\comfy-kitchen.disabled;%PYTHONPATH%"
 set "ROCM_CORE=%PYTHON_SITE_PACKAGES%\_rocm_sdk_core"
 set "ROCM_DEVEL=%PYTHON_SITE_PACKAGES%\_rocm_sdk_devel"
 set "ROCM_LIBS=%PYTHON_SITE_PACKAGES%\_rocm_sdk_libraries_gfx1151"

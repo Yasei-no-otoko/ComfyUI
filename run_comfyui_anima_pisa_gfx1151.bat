@@ -4,7 +4,7 @@ cd /d C:\ComfyUI
 
 set "PYTHON_EXE=C:\Users\HarutoWatanabe\AppData\Local\Programs\Python\Python313\python.exe"
 set "PYTHON_SITE_PACKAGES=C:\Users\HarutoWatanabe\AppData\Local\Programs\Python\Python313\Lib\site-packages"
-set "PYTHONPATH=C:\ComfyUI\custom_nodes\comfy-kitchen;%PYTHONPATH%"
+set "PYTHONPATH=C:\ComfyUI\custom_nodes\comfy-kitchen.disabled;%PYTHONPATH%"
 set "ROCM_CORE=%PYTHON_SITE_PACKAGES%\_rocm_sdk_core"
 set "ROCM_DEVEL=%PYTHON_SITE_PACKAGES%\_rocm_sdk_devel"
 set "ROCM_LIBS=%PYTHON_SITE_PACKAGES%\_rocm_sdk_libraries_gfx1151"
@@ -56,7 +56,7 @@ set "TENSILE_SOLUTION_SELECTION_METHOD=0"
 set "TENSILE_STREAMK_DYNAMIC_GRID=6"
 
 rem Flash remains the validated fallback for the first four and cross-attention blocks.
-set "TORCH_ROCM_FA_PREFER_CK=0"
+set "TORCH_ROCM_FA_PREFER_CK=1"
 set "FLASH_ATTENTION_TRITON_AMD_ENABLE=FALSE"
 set "COMFYUI_ENABLE_MIOPEN=1"
 set "PYTHONFAULTHANDLER=1"
