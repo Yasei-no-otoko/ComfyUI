@@ -21,7 +21,8 @@ class ROCmFPXCLIPLoader(io.ComfyNode):
             inputs=[
                 io.Combo.Input("gguf_name", options=folder_paths.get_filename_list("rocmfpx_text_encoders")),
                 io.Combo.Input("type", options=["qwen_image_21", "minimax_h3"]),
-                io.Combo.Input("companion_name", options=["none"] + folder_paths.get_filename_list("text_encoders")),
+                io.Combo.Input("companion_name", options=["none"] + folder_paths.filter_files_extensions(
+                    folder_paths.get_filename_list("text_encoders"), {".safetensors", ".sft"})),
             ],
             outputs=[io.Clip.Output()],
         )

@@ -192,10 +192,15 @@ class ROCmFPXCLIP(comfy.sd.CLIP):
         state_dict = {}
         dtype = torch.float32
         if model_kind == "minimax_h3":
+            if companion_path is None or Path(companion_path).suffix.lower() not in (".safetensors", ".sft"):
+                raise ValueError("The MiniMax H3 companion must be a safetensors (.safetensors or .sft) file")
             with safetensors.safe_open(companion_path, framework="pt", device="cpu") as source:
-                dtype = source.get_tensor("model.layers.0.input_layernorm.weight").dtype
-                state_dict = {key: source.get_tensor(key) for key in source.keys()
+                keys = source.keys()
+                if "model.embed_tokens.weight" not in keys:
+                    raise ValueError("The MiniMax H3 companion is missing model.embed_tokens.weight")
+                state_dict = {key: source.get_tensor(key) for key in keys
                               if key.startswith(("visual.", "model.embed_tokens."))}
+                dtype = state_dict["model.embed_tokens.weight"].dtype
             state_dict, _ = comfy.utils.convert_old_quants(state_dict, model_prefix="", metadata={})
             target = SimpleNamespace(params={}, clip=H3TE, tokenizer=minimax.MiniMaxH3Tokenizer)
         elif model_kind == "qwen_image_21":

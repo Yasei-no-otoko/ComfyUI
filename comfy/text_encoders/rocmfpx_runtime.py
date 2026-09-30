@@ -9,6 +9,7 @@ import ctypes as ct
 import importlib.util
 import os
 from pathlib import Path
+import threading
 
 import numpy as np
 
@@ -85,6 +86,10 @@ class ModelOverride(ct.Structure):
 
 EvalCallback = ct.CFUNCTYPE(ct.c_bool, ct.POINTER(Tensor), ct.c_bool, ct.c_void_p)
 
+# Quantization state belongs to the native ggml-base library, not each CDLL wrapper.
+_backend_users = {}
+_backend_lock = threading.Lock()
+
 
 def bind(library, name, result, *arguments):
     function = getattr(library, name)
@@ -98,6 +103,9 @@ class FpxSession:
                  kv_type="f32", flash_attn=False, device_index=0):
         if os.name != "nt" or ct.sizeof(ct.c_void_p) != 8:
             raise RuntimeError("This ROCmFPX binding requires Windows x64")
+        # GGML caches these flags on the first BLAS operation, not backend init.
+        if "GGML_CUDA_FORCE_CUBLAS_COMPUTE_16F" in os.environ or "GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F" not in os.environ:
+            raise RuntimeError("Before starting ComfyUI, unset GGML_CUDA_FORCE_CUBLAS_COMPUTE_16F and set GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F=1 for ROCmFPX, then restart ComfyUI")
         self.hidden_size, self.layers = {"qwen_image_21": (4096, 36), "minimax_h3": (5120, 50)}[model_kind]
         self.headless = model_kind == "minimax_h3"
         self.kv_type = {"f32": 0, "f16": 1}[kv_type]
@@ -106,9 +114,6 @@ class FpxSession:
         self.backend_initialized = False
         self.dll_directories = []
         dll_directory = Path(dll_directory).resolve()
-        # gfx1151's default F16 BLAS accumulation changes Qwen conditioning.
-        os.environ.pop("GGML_CUDA_FORCE_CUBLAS_COMPUTE_16F", None)
-        os.environ["GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F"] = "1"
         try:
             self.dll_directories.append(os.add_dll_directory(str(dll_directory)))
             for package in ("_rocm_sdk_core", "_rocm_sdk_libraries"):
@@ -123,8 +128,12 @@ class FpxSession:
                 raise RuntimeError("Use ROCmFPX 3fca7f4bb DLLs with the softmax reduction fix")
             self.llama = ct.CDLL(str(dll_directory / "llama.dll"))
             self._bind_functions()
-            self.llama.llama_backend_init()
-            self.backend_initialized = True
+            with _backend_lock:
+                handle = self.ggml._handle
+                if handle not in _backend_users:
+                    self.llama.llama_backend_init()
+                _backend_users[handle] = _backend_users.get(handle, 0) + 1
+                self.backend_initialized = True
             params = self.llama.llama_model_default_params()
             params.n_gpu_layers = gpu_layers
             params.main_gpu = device_index
@@ -286,8 +295,13 @@ class FpxSession:
             self.llama.llama_model_free(self.model)
             self.model = None
         if self.backend_initialized:
-            self.llama.llama_backend_free()
-            self.backend_initialized = False
+            with _backend_lock:
+                handle = self.ggml._handle
+                _backend_users[handle] -= 1
+                if _backend_users[handle] == 0:
+                    self.llama.llama_backend_free()
+                    del _backend_users[handle]
+                self.backend_initialized = False
         for handle in self.dll_directories:
             handle.close()
         self.dll_directories.clear()
